@@ -1454,6 +1454,69 @@ main().catch((e) => { console.error(e && e.stack || e); process.exit(1); });
   assert(nb.code === 0 && nb.stdout.includes("NETB_OK"),
     "Path B: real Node lib/net.js runs (echo server/client, address(), 2nd conn, chunked, ECONNREFUSED)");
 
+  // A TCP connection from ANOTHER process rides the kernel pipe relay, and the
+  // server must still see who called: socket.remoteAddress/remotePort are the
+  // client's address and its localPort, and two clients never share a port (each
+  // worker used to number its own client ports from 49152, and the accepted
+  // socket had no remote port at all, so req.ip and friends read undefined).
+  kernel.writeFile(
+    "/t/xnet-client.js",
+    `
+const net = require('net');
+const c = net.connect(Number(process.argv[2]), '127.0.0.1', () => {
+  process.send({ localPort: c.localPort }, () => c.end());
+});
+c.on('error', (e) => { console.error(e); process.exit(1); });
+`,
+  );
+  kernel.writeFile(
+    "/t/xnet.js",
+    `
+const assert = require('assert');
+const cp = require('child_process');
+const net = require('net');
+
+const seen = [];
+const server = net.createServer((sock) => {
+  seen.push({ remoteAddress: sock.remoteAddress, remotePort: sock.remotePort, localPort: sock.localPort });
+  sock.resume();
+});
+function client(port) {
+  return new Promise((resolve, reject) => {
+    const child = cp.fork('/t/xnet-client.js', [String(port)]);
+    let localPort;
+    child.on('message', (m) => { localPort = m.localPort; });
+    child.on('exit', (code) => (code === 0 ? resolve(localPort) : reject(new Error('client exited ' + code))));
+  });
+}
+server.listen(0, '127.0.0.1', async () => {
+  const port = server.address().port;
+  // Held open across the dials below: a connection made inside this process
+  // must not share a port with one that came through the kernel.
+  const own = net.connect(port, '127.0.0.1');
+  await new Promise((resolve) => own.on('connect', resolve));
+  while (seen.length === 0) await new Promise((resolve) => setImmediate(resolve));
+  const ownPort = seen.shift().remotePort;
+  const ports = [await client(port), await client(port)];
+  assert(!ports.includes(ownPort), 'a cross-process client never gets the port of an open in-process connection');
+  own.destroy();
+  assert.strictEqual(seen.length, 2, 'both connections accepted');
+  for (let i = 0; i < 2; i++) {
+    assert.strictEqual(seen[i].remoteAddress, '127.0.0.1', 'remoteAddress is loopback');
+    assert.strictEqual(seen[i].remotePort, ports[i], 'remotePort is the client socket localPort');
+    assert.strictEqual(seen[i].localPort, port, 'the accepted socket localPort is the server port');
+  }
+  assert.notStrictEqual(ports[0], ports[1], 'two clients in different processes get different ports');
+  server.close();
+  console.log('XNET_OK');
+});
+`,
+  );
+  const xn = await kernel.start("node", ["/t/xnet.js"], { cwd: "/t", capture: true });
+  assert(xn.code === 0 && xn.stdout.includes("XNET_OK"),
+    "cross-process TCP: the server sees each client's address and a port no other open connection has" +
+      (xn.code === 0 ? "" : "\n" + xn.stdout + xn.stderr));
+
   // Path B proof (#8): require('http') is Node's REAL vendored lib/http.js +
   // _http_* running on internalBinding('http_parser') over the net loopback. The
   // parser is now real llhttp compiled to Wasm (process.versions.llhttp is set

@@ -159,7 +159,8 @@ export const OP_FETCH_ASYNC = 30;
 // resolves that path to a live connection id (OP_PIPE_CONNECT). Once connected,
 // raw bytes flow OUT OF BAND (never this SAB — neither side is parked on it) as
 // postMessages the kernel relays between the two processes, keyed by connId:
-//   { type:'pipe-open',  connId, path }         kernel -> server (accept it)
+//   { type:'pipe-open',  connId, path, remote? } kernel -> server (accept it;
+//                                                remote is the peer "ip:port" of a TCP dial)
 //   { type:'pipe-data',  connId, chunk }        peer   -> peer   (bytes)
 //   { type:'pipe-shutdown', connId }            peer   -> peer   (half-close/EOF)
 //   { type:'pipe-close', connId }               peer   -> peer   (teardown)
@@ -167,7 +168,8 @@ export const OP_FETCH_ASYNC = 30;
 // socket work in-VM — e.g. Nuxt/Nitro's dev server (its SSR worker <-> the main
 // process over `*.sock`) and vite-node's module socket.
 //   OP_PIPE_LISTEN        field0 = JSON {path} -> OK empty / ERR EADDRINUSE
-//   OP_PIPE_CONNECT       field0 = JSON {path} -> OK JSON {connId} / ERR ENOENT
+//   OP_PIPE_CONNECT       field0 = JSON {path} -> OK JSON {connId, localPort?} / ERR ENOENT
+//                         (localPort, the client port the kernel picked, only for a TCP dial)
 //   OP_PIPE_CLOSE_SERVER  field0 = JSON {path} -> OK empty
 // metadata writes (chmod/utimes). Both take a path, a f64 flag for "follow a
 // trailing symlink" (chmod vs lchmod, utimes vs lutimes) and land on the inode.

@@ -107,10 +107,15 @@ export function createNetBindings({ process, liveness, syscalls, netServers, pip
   // ---- tcp_wrap: the loopback TCP handle ------------------------------------
   const TCPConstants = { SOCKET: 0, SERVER: 1, UV_TCP_IPV6ONLY: 1, UV_TCP_REUSEPORT: 2 };
   const listeners = new Map(); // port -> server TCP handle
-  let ephemeral = 49152;
+  // Below the kernel's CROSS_PROCESS_PORT_MIN-MAX (49152-65535), so a
+  // connection made inside this process never shares a port with one that
+  // came through the kernel.
+  const IN_PROCESS_PORT_MIN = 32768;
+  const IN_PROCESS_PORT_MAX = 49151;
+  let ephemeral = IN_PROCESS_PORT_MIN - 1;
   const allocPort = () => {
     do {
-      ephemeral = ephemeral >= 65535 ? 49152 : ephemeral + 1;
+      ephemeral = ephemeral >= IN_PROCESS_PORT_MAX ? IN_PROCESS_PORT_MIN : ephemeral + 1;
     } while (listeners.has(ephemeral));
     return ephemeral;
   };
@@ -376,7 +381,6 @@ export function createNetBindings({ process, liveness, syscalls, netServers, pip
       this._remoteAddress = address;
       this._remotePort = p;
       this._localAddress = "127.0.0.1";
-      this._localPort = allocPort();
       if (!server || server._closed) {
         // Not served in THIS process — a different in-VM process may own the
         // port. Dial it through the kernel pipe relay (same transport as UNIX
@@ -384,15 +388,17 @@ export function createNetBindings({ process, liveness, syscalls, netServers, pip
         // relayed `pipe-*` messages by connId. Falls back to ECONNREFUSED when
         // nobody in the VM is listening, matching libuv.
         if (pipeBridge && pipeBridge.postRaw && syscalls && syscalls.pipeConnect) {
-          let connId = 0;
+          let reply = null;
           try {
-            connId = syscalls.pipeConnect(tcpXKey(p)).connId | 0;
-          } catch {
-            connId = 0;
-          }
+            reply = syscalls.pipeConnect(tcpXKey(p));
+          } catch {}
+          const connId = reply ? reply.connId | 0 : 0;
           if (connId > 0) {
             this._xproc = true;
             this._connId = connId;
+            // The kernel picks the client port for a cross-process dial, so the
+            // server's remotePort for this connection is this socket's localPort.
+            this._localPort = reply.localPort;
             xpipeConns.set(connId, this);
             nextTick(() => {
               this._live = true;
@@ -405,6 +411,7 @@ export function createNetBindings({ process, liveness, syscalls, netServers, pip
         nextTick(() => req.oncomplete(UV_CODES.UV_ECONNREFUSED, this, req, false, false));
         return 0;
       }
+      this._localPort = allocPort();
       // Build the server-side peer endpoint and link the two.
       const peer = new TCP(TCPConstants.SOCKET);
       peer._localAddress = address;
@@ -843,11 +850,14 @@ export function createNetBindings({ process, liveness, syscalls, netServers, pip
       peer._ackReads = msg.ackReads === true;
       if (peer instanceof Pipe) peer._remotePath = String(msg.path);
       else {
-        // A connection relayed in from outside the VM (kernel net relay) carries
-        // the real peer "ip:port"; an in-VM cross-process dial is loopback.
+        // The kernel sends the peer "ip:port": the real one for a connection relayed
+        // in from outside the VM (kernel net relay), loopback and the client port it
+        // picked for an in-VM cross-process dial.
         const m = typeof msg.remote === "string" ? /^(.*):(\d+)$/.exec(msg.remote) : null;
         peer._remoteAddress = m ? m[1].replace(/^\[|\]$/g, "") : "127.0.0.1";
         if (m) peer._remotePort = Number(m[2]);
+        peer._localAddress = "127.0.0.1";
+        peer._localPort = server._localPort;
       }
       xpipeConns.set(connId, peer);
       peer._live = true;
