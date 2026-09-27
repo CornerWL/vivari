@@ -1464,7 +1464,7 @@ main().catch((e) => { console.error(e && e.stack || e); process.exit(1); });
     `
 const net = require('net');
 const c = net.connect(Number(process.argv[2]), '127.0.0.1', () => {
-  process.send({ localPort: c.localPort }, () => c.end());
+  process.send({ localPort: c.localPort, pid: process.pid }, () => c.end());
 });
 c.on('error', (e) => { console.error(e); process.exit(1); });
 `,
@@ -1484,9 +1484,9 @@ const server = net.createServer((sock) => {
 function client(port) {
   return new Promise((resolve, reject) => {
     const child = cp.fork('/t/xnet-client.js', [String(port)]);
-    let localPort;
-    child.on('message', (m) => { localPort = m.localPort; });
-    child.on('exit', (code) => (code === 0 ? resolve(localPort) : reject(new Error('client exited ' + code))));
+    let reported;
+    child.on('message', (m) => { reported = m; });
+    child.on('exit', (code) => (code === 0 ? resolve(reported) : reject(new Error('client exited ' + code))));
   });
 }
 server.listen(0, '127.0.0.1', async () => {
@@ -1497,7 +1497,8 @@ server.listen(0, '127.0.0.1', async () => {
   await new Promise((resolve) => own.on('connect', resolve));
   while (seen.length === 0) await new Promise((resolve) => setImmediate(resolve));
   const ownPort = seen.shift().remotePort;
-  const ports = [await client(port), await client(port)];
+  const clients = [await client(port), await client(port)];
+  const ports = clients.map((c) => c.localPort);
   assert(!ports.includes(ownPort), 'a cross-process client never gets the port of an open in-process connection');
   own.destroy();
   assert.strictEqual(seen.length, 2, 'both connections accepted');
@@ -1508,14 +1509,32 @@ server.listen(0, '127.0.0.1', async () => {
   }
   assert.notStrictEqual(ports[0], ports[1], 'two clients in different processes get different ports');
   server.close();
-  console.log('XNET_OK');
+  console.log('XNET_OK ' + JSON.stringify({ port, pid: process.pid, clients }));
 });
 `,
   );
+  const connections = [];
+  kernel.onConnect = (conn) => connections.push(conn);
   const xn = await kernel.start("node", ["/t/xnet.js"], { cwd: "/t", capture: true });
+  kernel.onConnect = null;
   assert(xn.code === 0 && xn.stdout.includes("XNET_OK"),
     "cross-process TCP: the server sees each client's address and a port no other open connection has" +
       (xn.code === 0 ? "" : "\n" + xn.stdout + xn.stderr));
+  // kernel.onConnect names both ends of each of those connections: the ports the
+  // sockets reported, the server's pid, and the client's pid and parents.
+  const xnSeen = JSON.parse(/XNET_OK (.*)/.exec(xn.stdout)?.[1] ?? "null");
+  const expected = xnSeen && xnSeen.clients.map((c) => ({
+    port: xnSeen.port,
+    remotePort: c.localPort,
+    pid: xnSeen.pid,
+    remotePid: c.pid,
+    // forked by the server process, which the harness started with no parent
+    remoteAncestors: [xnSeen.pid],
+  }));
+  const connOk = JSON.stringify(connections) === JSON.stringify(expected);
+  assert(connOk,
+    "kernel.onConnect reports each cross-process TCP connection with both pids and the client's parents" +
+      (connOk ? "" : "\n    got " + JSON.stringify(connections) + "\n    expected " + JSON.stringify(expected)));
 
   // Path B proof (#8): require('http') is Node's REAL vendored lib/http.js +
   // _http_* running on internalBinding('http_parser') over the net loopback. The

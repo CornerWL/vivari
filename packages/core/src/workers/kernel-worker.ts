@@ -1907,6 +1907,7 @@ async function boot() {
     servingProbed.delete(port);
     post("port-close", { port });
   };
+  kernel.onConnect = (conn) => post("connection", conn);
   kernel.onFetch = (url, info) => {
     const tid = terminalForPid(info.pid);
     if (tid === undefined) {

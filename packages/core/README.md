@@ -206,6 +206,7 @@ const [port, url] = await vivari.once("server-ready");
 | `server-ready` | `(port, url)`                                | a server is listening **and has answered a request** — safe to point an iframe at |
 | `port`         | `(port, "open" \| "close", url)`             | the raw bind/unbind, with no serving check |
 | `fs-change`    | `({ kind, path })`                           | something under the VFS changed |
+| `connection`   | `({ port, remotePort, pid, remotePid, remoteAncestors })` | a process opened a TCP connection to a server in another process |
 | `error`        | `(error: VivariError)`                       | an unrecoverable kernel error |
 
 A dev server binds, closes and rebinds its port several times while starting, so

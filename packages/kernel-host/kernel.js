@@ -181,6 +181,7 @@ export class Kernel {
     this.nextReqId = 1;
     this.onListen = null; // optional observer (port, pid) — e.g. wire a preview
     this.onClose = null; // optional observer (port, pid) — the mirror of onListen
+    this.onConnect = null; // optional observer (ConnectionEvent) — a process dialed a TCP server in another
 
     // ---- WebSocket tunnel (roadmap #19 stage C) ----
     // The browser preview tunnels each ws connection to us (it can't reach an
@@ -1498,8 +1499,25 @@ export class Kernel {
     // connId from the OK reply below and starts relaying bytes.
     const remote = tcp ? "127.0.0.1:" + clientPort : undefined;
     this.postToProc(serverPid, { type: "pipe-open", connId, path, remote });
+    if (tcp && this.onConnect) {
+      this.onConnect({
+        port: Number(path.slice(TCP_PREFIX.length)),
+        remotePort: clientPort,
+        pid: serverPid,
+        remotePid: proc.pid,
+        remoteAncestors: this.ancestorsOf(proc.pid),
+      });
+    }
     // JSON drops localPort when it's undefined, as it is for a UNIX socket.
     this.respondOk(proc, encodeString(JSON.stringify({ connId, localPort: clientPort })));
+  }
+
+  // A process's parent, its parent's parent, and so on, nearest first. Pids only
+  // grow, so a parent's is always lower and the walk ends.
+  ancestorsOf(pid) {
+    const ancestors = [];
+    for (let p = this.procs.get(pid)?.parentPid; p; p = this.procs.get(p)?.parentPid) ancestors.push(p);
+    return ancestors;
   }
 
   // The next ephemeral port not held by an open cross-process connection or a

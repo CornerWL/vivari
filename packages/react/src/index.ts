@@ -62,6 +62,8 @@ export { isCrossOriginIsolated, resetVfs, VivariError, VivariFsError } from "@vi
 // are omitted with `KernelBridge` — they only describe that escape hatch.)
 export type {
   BootOptions,
+  ConnectionEvent,
+  ConnectionListener,
   DirectoryNode,
   DirEnt,
   Encoding,
