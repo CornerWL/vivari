@@ -213,6 +213,15 @@ A dev server binds, closes and rebinds its port several times while starting, so
 `port` fires repeatedly with `"open"` before the app is loadable. `server-ready` is
 the one to build on.
 
+`connection` covers in-VM traffic **between** processes only, and fires before either
+end can send anything — so it arrives ahead of whatever the server prints about the
+connection. A connection a process makes to itself does not fire it, and neither does
+one relayed in from outside the VM. `remotePort` matches the client socket's
+`localPort` and the server's `socket.remotePort`, and no other connection reported by
+this event holds it while this one is open. `remoteAncestors` lists only ancestors
+still running, nearest first: it stops at the first one that has already exited, so
+match on it rather than requiring a particular length.
+
 ### `vivari.previewUrl(port, pathAndQuery?)` · `vivari.attachPreview(iframe)`
 
 Build the preview URL for an in-VM port (correct in all three preview-isolation

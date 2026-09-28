@@ -248,6 +248,22 @@ A dev server binds, closes and rebinds its port several times while starting, so
 Build on it unless you specifically want the raw bind.
 :::
 
+:::note What `"connection"` does and does not report
+It covers in-VM traffic **between** processes only, and fires before either end can
+send anything, so it arrives ahead of whatever the server prints about the connection.
+A connection a process makes to itself does not fire it, and neither does one relayed
+in from outside the VM.
+
+`remotePort` matches the client socket's `localPort` and the server's
+`socket.remotePort`, and no other connection reported by this event holds it while
+this one is open — but it is not unique among every socket in the VM, so treat
+(address, port) as the identity as you would on a real host.
+
+`remoteAncestors` lists only ancestors **still running**, nearest first. The walk
+stops at the first one that has already exited, so `[]` means the client's parent is
+gone rather than absent; match on the pids present instead of on a length.
+:::
+
 ## Previews
 
 `vivari.previewUrl(port, pathAndQuery?)` builds the preview URL for an in-VM port,

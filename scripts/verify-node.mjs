@@ -1536,6 +1536,66 @@ server.listen(0, '127.0.0.1', async () => {
     "kernel.onConnect reports each cross-process TCP connection with both pids and the client's parents" +
       (connOk ? "" : "\n    got " + JSON.stringify(connections) + "\n    expected " + JSON.stringify(expected)));
 
+  // The kernel refuses a cross-process dial with EADDRNOTAVAIL once every client
+  // port is held, and the binding has to pass that code through rather than report
+  // the server as having refused — it is listening; the kernel ran out of ports.
+  // Also the only check that a port comes BACK when a connection's process dies.
+  kernel.writeFile(
+    "/t/xports-client.js",
+    `
+const net = require('net');
+const c = net.connect(Number(process.argv[2]), '127.0.0.1', () => {
+  // Hold the connection (and the port) open until the parent kills us.
+  process.send({ localPort: c.localPort });
+});
+c.on('error', (e) => process.send({ code: e.code }));
+`,
+  );
+  kernel.writeFile(
+    "/t/xports.js",
+    `
+const assert = require('assert');
+const cp = require('child_process');
+const net = require('net');
+
+const server = net.createServer((sock) => sock.resume());
+function dial() {
+  return new Promise((resolve) => {
+    const ch = cp.fork('/t/xports-client.js', [String(server.address().port)]);
+    ch.once('message', (m) => resolve({ ch, m }));
+  });
+}
+server.listen(0, '127.0.0.1', async () => {
+  // The harness narrowed the kernel's client-port window to exactly two.
+  const first = await dial();
+  const second = await dial();
+  assert(first.m.localPort > 0 && second.m.localPort > 0, 'both dials got a port: ' + JSON.stringify([first.m, second.m]));
+  assert.notStrictEqual(first.m.localPort, second.m.localPort, 'and not the same one');
+  const third = await dial();
+  assert.strictEqual(third.m.code, 'EADDRNOTAVAIL',
+    'a dial with every client port held reports EADDRNOTAVAIL, not ECONNREFUSED: ' + JSON.stringify(third.m));
+  third.ch.kill();
+  await new Promise((resolve) => { first.ch.once('exit', resolve); first.ch.kill(); });
+  const fourth = await dial();
+  assert.strictEqual(fourth.m.code, undefined, 'the dial after a port was freed is not refused');
+  assert.strictEqual(fourth.m.localPort, first.m.localPort, 'and gets the freed port back');
+  fourth.ch.kill();
+  second.ch.kill();
+  server.close();
+  console.log('XPORTS_OK');
+});
+`,
+  );
+  // Two ports wide: exhausting the real 49152-65535 would need 16384 connections
+  // open at once, so the refusal path would never run under a test.
+  const savedPortMax = kernel.clientPortMax;
+  kernel.clientPortMax = kernel.clientPortMin + 1;
+  const xp = await kernel.start("node", ["/t/xports.js"], { cwd: "/t", capture: true });
+  kernel.clientPortMax = savedPortMax;
+  assert(xp.code === 0 && xp.stdout.includes("XPORTS_OK"),
+    "cross-process TCP: a dial with every client port held is EADDRNOTAVAIL, and the port returns when its process dies" +
+      (xp.code === 0 ? "" : "\n" + xp.stdout + xp.stderr));
+
   // Path B proof (#8): require('http') is Node's REAL vendored lib/http.js +
   // _http_* running on internalBinding('http_parser') over the net loopback. The
   // parser is now real llhttp compiled to Wasm (process.versions.llhttp is set

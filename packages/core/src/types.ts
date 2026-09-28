@@ -186,13 +186,28 @@ export interface FsChangeEvent {
 export interface ConnectionEvent {
   /** The port the server accepted the connection on. */
   port: number;
-  /** The server's `socket.remotePort`: unique across the VM while the connection is open. */
+  /**
+   * The server's `socket.remotePort`. No other connection reported by this event has
+   * it while this one is open, so `remotePort` identifies the connection here.
+   *
+   * It is NOT unique among every socket in the VM: a connection a process makes to
+   * itself is numbered by that process from a lower range and never reaches this
+   * event, and a connection relayed in from outside carries its real peer's port.
+   * The pair (`remoteAddress`, `remotePort`) is what a server can treat as unique,
+   * as on a real host.
+   */
   remotePort: number;
   /** The server process. */
   pid: number;
   /** The client process. */
   remotePid: number;
-  /** The client's parent, its parent's parent, and so on, nearest first. */
+  /**
+   * The client's parent, its parent's parent, and so on, nearest first.
+   *
+   * Only ancestors still running: the walk stops at the first one that has already
+   * exited, so the chain may be shorter than the real one. `[]` means the client's
+   * parent is gone, not that it had none.
+   */
   remoteAncestors: number[];
 }
 

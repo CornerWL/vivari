@@ -211,6 +211,12 @@ export class Kernel {
     this.pipeConns = new Map(); // connId -> { clientPid, serverPid, clientPort? }
     this.nextPipeConnId = 1;
     this.nextClientPort = CROSS_PROCESS_PORT_MIN;
+    // The window allocClientPort() draws from. Fields rather than the constants
+    // directly so a test can narrow it to a couple of ports: exhausting the real
+    // 16384 needs that many connections open at once, so the EADDRNOTAVAIL path
+    // was otherwise unreachable from a test and had never run.
+    this.clientPortMin = CROSS_PROCESS_PORT_MIN;
+    this.clientPortMax = CROSS_PROCESS_PORT_MAX;
 
     // ---- optional network relay (net-relay.js) ----
     // Off unless setNetRelay(url) is called. Maps the relay's stream ids onto pipe
@@ -1490,6 +1496,9 @@ export class Kernel {
     const tcp = path.startsWith(TCP_PREFIX);
     const clientPort = tcp ? this.allocClientPort() : undefined;
     if (tcp && clientPort === undefined) {
+      // Every client port is held. The binding forwards this code as-is rather than
+      // folding it into ECONNREFUSED like the ENOENT above, because the server here
+      // IS listening — see the `EADDRNOTAVAIL` catch in runtime/node/bindings/net.js.
       this.respondErr(proc, "EADDRNOTAVAIL");
       return;
     }
@@ -1512,8 +1521,17 @@ export class Kernel {
     this.respondOk(proc, encodeString(JSON.stringify({ connId, localPort: clientPort })));
   }
 
-  // A process's parent, its parent's parent, and so on, nearest first. Pids only
-  // grow, so a parent's is always lower and the walk ends.
+  // A process's LIVE parent, its parent's parent, and so on, nearest first. Pids
+  // only grow, so a parent's is always lower and the walk ends.
+  //
+  // The walk stops at the first ancestor that has already exited, so the chain can
+  // be shorter than the real one and is never padded — `[]` means "the parent is
+  // gone", not "no parent". Nothing reparents an orphan onto pid 1 here, and the
+  // kernel drops a process's record when it exits (`this.procs.delete`), so
+  // reporting further would mean keeping a pid -> parentPid entry for every process
+  // that ever ran. A truncated chain is the honest answer to what the kernel still
+  // knows; consumers matching a connection to a process they spawned should treat a
+  // missing ancestor as unknown rather than as absent.
   ancestorsOf(pid) {
     const ancestors = [];
     for (let p = this.procs.get(pid)?.parentPid; p; p = this.procs.get(p)?.parentPid) ancestors.push(p);
@@ -1522,12 +1540,23 @@ export class Kernel {
 
   // The next ephemeral port not held by an open cross-process connection or a
   // listening server. Undefined when every one is taken.
+  //
+  // `held` is rebuilt per dial rather than kept as a running set alongside
+  // `pipeConns`, which is O(open connections) each time. Deliberate: connections
+  // are dropped in three places (pipe-close, either end exiting, the relay's own
+  // teardown), and a cached set that one of them forgets leaks a port permanently
+  // and silently, whereas deriving it from the map that IS the source of truth
+  // cannot. The scan is bounded by the connections actually open.
   allocClientPort() {
     const held = new Set();
     for (const conn of this.pipeConns.values()) held.add(conn.clientPort);
-    for (let i = 0; i <= CROSS_PROCESS_PORT_MAX - CROSS_PROCESS_PORT_MIN; i++) {
+    const min = this.clientPortMin;
+    const max = this.clientPortMax;
+    // The cursor can sit outside the window if it was narrowed since the last dial.
+    if (this.nextClientPort < min || this.nextClientPort > max) this.nextClientPort = min;
+    for (let i = 0; i <= max - min; i++) {
       const port = this.nextClientPort;
-      this.nextClientPort = port >= CROSS_PROCESS_PORT_MAX ? CROSS_PROCESS_PORT_MIN : port + 1;
+      this.nextClientPort = port >= max ? min : port + 1;
       if (!held.has(port) && !this.listeners.has(port)) return port;
     }
     return undefined;

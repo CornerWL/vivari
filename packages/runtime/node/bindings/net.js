@@ -110,6 +110,14 @@ export function createNetBindings({ process, liveness, syscalls, netServers, pip
   // Below the kernel's CROSS_PROCESS_PORT_MIN-MAX (49152-65535), so a
   // connection made inside this process never shares a port with one that
   // came through the kernel.
+  //
+  // This range is IANA's "registered" range, not its "dynamic" one (49152+), and
+  // `listen(0)` draws from it too — so an ephemeral LISTENER can now sit on a port
+  // some service has a registered name for (33060 is mysqlx, 32768 is filenet-tms),
+  // and an app that binds 0 and later binds that number explicitly gets EADDRINUSE
+  // from itself. Linux's own default ephemeral range starts at 32768 and has the
+  // same overlap, so this matches the host rather than IANA; the ordering below
+  // 49152 is what buys the guarantee above, and that is worth more here.
   const IN_PROCESS_PORT_MIN = 32768;
   const IN_PROCESS_PORT_MAX = 49151;
   let ephemeral = IN_PROCESS_PORT_MIN - 1;
@@ -387,11 +395,19 @@ export function createNetBindings({ process, liveness, syscalls, netServers, pip
         // sockets), keyed by the port's synthetic path; bytes then flow as
         // relayed `pipe-*` messages by connId. Falls back to ECONNREFUSED when
         // nobody in the VM is listening, matching libuv.
+        let refused = 0;
         if (pipeBridge && pipeBridge.postRaw && syscalls && syscalls.pipeConnect) {
           let reply = null;
           try {
             reply = syscalls.pipeConnect(tcpXKey(p));
-          } catch {}
+          } catch (err) {
+            // ENOENT is the kernel's "nobody holds this port", which libuv reports
+            // for a dial as ECONNREFUSED — the fallback below, and the common case.
+            // EADDRNOTAVAIL is a different failure: the server IS listening and the
+            // kernel ran out of client ports. Flattening that into "connection
+            // refused" would send the caller looking for a server that is there.
+            if (err && err.code === "EADDRNOTAVAIL") refused = UV_CODES.UV_EADDRNOTAVAIL;
+          }
           const connId = reply ? reply.connId | 0 : 0;
           if (connId > 0) {
             this._xproc = true;
@@ -408,7 +424,8 @@ export function createNetBindings({ process, liveness, syscalls, netServers, pip
             return 0;
           }
         }
-        nextTick(() => req.oncomplete(UV_CODES.UV_ECONNREFUSED, this, req, false, false));
+        const errno = refused || UV_CODES.UV_ECONNREFUSED;
+        nextTick(() => req.oncomplete(errno, this, req, false, false));
         return 0;
       }
       this._localPort = allocPort();
