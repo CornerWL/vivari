@@ -67,7 +67,13 @@ const NET_PID = -1;
 // The key a TCP server registers with the kernel pipe table (mirrors `tcpXKey` in
 // runtime/node/bindings/net.js) — an inbound relay connection is handed to the
 // owning process as a `pipe-open` on this key, exactly like a cross-process dial.
-const tcpXKey = (port) => "\u0000oc-tcp:" + (port >>> 0);
+const TCP_PREFIX = "\u0000oc-tcp:";
+const tcpXKey = (port) => TCP_PREFIX + (port >>> 0);
+// The ephemeral range the client end of a cross-process TCP connection is given
+// a port from (see allocClientPort). Connections made inside one process take
+// theirs from IN_PROCESS_PORT_MIN-MAX below it (runtime/node/bindings/net.js).
+const CROSS_PROCESS_PORT_MIN = 49152;
+const CROSS_PROCESS_PORT_MAX = 65535;
 // A process dials an EXTERNAL host by connecting to this synthetic path; the
 // kernel answers ENOENT when no relay is configured, so the binding falls back to
 // its normal refusal (EHOSTUNREACH / ENOTFOUND) and behavior is unchanged.
@@ -175,6 +181,7 @@ export class Kernel {
     this.nextReqId = 1;
     this.onListen = null; // optional observer (port, pid) — e.g. wire a preview
     this.onClose = null; // optional observer (port, pid) — the mirror of onListen
+    this.onConnect = null; // optional observer (ConnectionEvent) — a process dialed a TCP server in another
 
     // ---- WebSocket tunnel (roadmap #19 stage C) ----
     // The browser preview tunnels each ws connection to us (it can't reach an
@@ -201,8 +208,9 @@ export class Kernel {
     // is what makes Nuxt/Nitro's dev worker (which talks to the main process over a
     // `*.sock` UNIX socket) reachable in-VM. See OP_PIPE_* in protocol/syscall.js.
     this.pipeListeners = new Map(); // socketPath -> pid of the server process
-    this.pipeConns = new Map(); // connId -> { clientPid, serverPid }
+    this.pipeConns = new Map(); // connId -> { clientPid, serverPid, clientPort? }
     this.nextPipeConnId = 1;
+    this.nextClientPort = CROSS_PROCESS_PORT_MIN;
 
     // ---- optional network relay (net-relay.js) ----
     // Off unless setNetRelay(url) is called. Maps the relay's stream ids onto pipe
@@ -1476,12 +1484,53 @@ export class Kernel {
       this.respondErr(proc, "ENOENT");
       return;
     }
+    // A TCP dial gets its client port here rather than from the dialing worker, so
+    // the port is unique across the VM and the server's socket.remotePort names
+    // this connection, as it would on a real host.
+    const tcp = path.startsWith(TCP_PREFIX);
+    const clientPort = tcp ? this.allocClientPort() : undefined;
+    if (tcp && clientPort === undefined) {
+      this.respondErr(proc, "EADDRNOTAVAIL");
+      return;
+    }
     const connId = this.nextPipeConnId++;
-    this.pipeConns.set(connId, { clientPid: proc.pid, serverPid });
+    this.pipeConns.set(connId, { clientPid: proc.pid, serverPid, clientPort });
     // Tell the server to build its endpoint and accept; the client learns the
     // connId from the OK reply below and starts relaying bytes.
-    this.postToProc(serverPid, { type: "pipe-open", connId, path });
-    this.respondOk(proc, encodeString(JSON.stringify({ connId })));
+    const remote = tcp ? "127.0.0.1:" + clientPort : undefined;
+    this.postToProc(serverPid, { type: "pipe-open", connId, path, remote });
+    if (tcp && this.onConnect) {
+      this.onConnect({
+        port: Number(path.slice(TCP_PREFIX.length)),
+        remotePort: clientPort,
+        pid: serverPid,
+        remotePid: proc.pid,
+        remoteAncestors: this.ancestorsOf(proc.pid),
+      });
+    }
+    // JSON drops localPort when it's undefined, as it is for a UNIX socket.
+    this.respondOk(proc, encodeString(JSON.stringify({ connId, localPort: clientPort })));
+  }
+
+  // A process's parent, its parent's parent, and so on, nearest first. Pids only
+  // grow, so a parent's is always lower and the walk ends.
+  ancestorsOf(pid) {
+    const ancestors = [];
+    for (let p = this.procs.get(pid)?.parentPid; p; p = this.procs.get(p)?.parentPid) ancestors.push(p);
+    return ancestors;
+  }
+
+  // The next ephemeral port not held by an open cross-process connection or a
+  // listening server. Undefined when every one is taken.
+  allocClientPort() {
+    const held = new Set();
+    for (const conn of this.pipeConns.values()) held.add(conn.clientPort);
+    for (let i = 0; i <= CROSS_PROCESS_PORT_MAX - CROSS_PROCESS_PORT_MIN; i++) {
+      const port = this.nextClientPort;
+      this.nextClientPort = port >= CROSS_PROCESS_PORT_MAX ? CROSS_PROCESS_PORT_MIN : port + 1;
+      if (!held.has(port) && !this.listeners.has(port)) return port;
+    }
+    return undefined;
   }
 
   // A process produced bytes / a half-close / a teardown for one of its

@@ -182,6 +182,20 @@ export interface FsChangeEvent {
   path: string;
 }
 
+/** A TCP connection between two processes in the VM. */
+export interface ConnectionEvent {
+  /** The port the server accepted the connection on. */
+  port: number;
+  /** The server's `socket.remotePort`: unique across the VM while the connection is open. */
+  remotePort: number;
+  /** The server process. */
+  pid: number;
+  /** The client process. */
+  remotePid: number;
+  /** The client's parent, its parent's parent, and so on, nearest first. */
+  remoteAncestors: number[];
+}
+
 /** Options for {@link FileSystemAPI.watch}. */
 export interface WatchOptions {
   /**
@@ -257,12 +271,16 @@ export type PortKind = "open" | "close";
  *   `server-ready` for the same port, and again with `"close"` when it goes away.
  * - `fs-change` — something under the VFS changed. Coalesce these; a single
  *   install fires thousands.
+ * - `connection` — a process opened a TCP connection to a server in another.
+ *   Fires before either end can send anything, so it arrives ahead of any output
+ *   the server prints about the connection.
  * - `error` — an unrecoverable kernel error.
  */
 export interface VivariEventMap {
   "server-ready": [port: number, url: string];
   port: [port: number, kind: PortKind, url: string];
   "fs-change": [event: FsChangeEvent];
+  connection: [event: ConnectionEvent];
   error: [error: VivariError];
 }
 
@@ -277,6 +295,9 @@ export type PortListener = VivariListener<"port">;
 
 /** Fired when the VFS changes. */
 export type FsChangeListener = VivariListener<"fs-change">;
+
+/** Fired when a process connects to a TCP server in another process. */
+export type ConnectionListener = VivariListener<"connection">;
 
 /** Fired on unrecoverable kernel errors. */
 export type ErrorListener = VivariListener<"error">;

@@ -72,6 +72,15 @@ export class Vivari {
       const port = m.port as number;
       this.emit("server-ready", port, bridge.previewUrlFor(port));
     });
+    bridge.on("connection", (m: KernelMessage) => {
+      this.emit("connection", {
+        port: m.port as number,
+        remotePort: m.remotePort as number,
+        pid: m.pid as number,
+        remotePid: m.remotePid as number,
+        remoteAncestors: m.remoteAncestors as number[],
+      });
+    });
     bridge.on("port-close", (m: KernelMessage) => {
       const port = m.port as number;
       this.emit("port", port, "close", bridge.previewUrlFor(port));

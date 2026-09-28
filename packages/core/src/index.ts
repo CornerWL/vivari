@@ -38,6 +38,8 @@ export type {
 
 export type {
   BootOptions,
+  ConnectionEvent,
+  ConnectionListener,
   DirectoryNode,
   DirEnt,
   Encoding,

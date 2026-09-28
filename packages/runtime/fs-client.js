@@ -246,7 +246,8 @@ export function createSyscalls({ ctrl, data, notify, onSignal = null }) {
     // it. Throws EADDRINUSE if another live process already owns the path.
     pipeListen: (path) => call(OP_PIPE_LISTEN, encodeRequest([b(JSON.stringify({ path }))])),
     // Resolve `path` to a live cross-process connection. Returns { connId } on
-    // success; throws ENOENT if no process is listening on that path. Data then
+    // success, plus the kernel-picked { localPort } for a TCP dial; throws ENOENT
+    // if no process is listening on that path. Data then
     // flows out of band (postMessage), keyed by connId — see OP_PIPE_* in syscall.js.
     pipeConnect: (path) =>
       JSON.parse(decodeBytes(call(OP_PIPE_CONNECT, encodeRequest([b(JSON.stringify({ path }))])))),
