@@ -123,6 +123,69 @@ function applyDevtools(enabled, waitUntil) {
   if (waitUntil) waitUntil(persist);
 }
 
+// The kernel host's Document-Isolation-Policy, mirrored onto preview documents: a preview
+// whose policy differs from its host's lands in another agent cluster, where the host's
+// `contentWindow.location` throws. Null adds nothing. Persisted so a revived SW keeps it.
+const ISOLATION_POLICY_KEY = "https://vv.config/isolation-policy";
+const ISOLATION_POLICIES = ["isolate-and-require-corp", "isolate-and-credentialless"];
+const ISOLATION_PROBE_TIMEOUT_MS = 3000;
+let isolationPolicy = null; // Promise<string | null>; a probe in flight replaces it
+let isolationPolicyLearnedFrom = null; // the host URL probed by this SW instance
+
+async function readConfig(key, fallback) {
+  try {
+    const cache = await caches.open(KEEP_PREFIX_CACHE);
+    const hit = await cache.match(key);
+    return hit ? await hit.json() : fallback;
+  } catch (_) {
+    return fallback;
+  }
+}
+
+async function writeConfig(key, value) {
+  try {
+    const cache = await caches.open(KEEP_PREFIX_CACHE);
+    await cache.put(key, new Response(JSON.stringify(value)));
+  } catch (_) {
+    /* best-effort persistence */
+  }
+}
+
+function loadIsolationPolicy() {
+  if (!isolationPolicy) isolationPolicy = readConfig(ISOLATION_POLICY_KEY, null);
+  return isolationPolicy;
+}
+
+// Reporting parameters (`; report-to=…`) are the host's own and are not copied.
+function parseIsolationPolicy(header) {
+  const token = (header || "").split(";")[0].trim().toLowerCase();
+  return ISOLATION_POLICIES.includes(token) ? token : null;
+}
+
+// Read off the host document's own response. A failed probe keeps the last known policy
+// and is retried on the host's next announcement.
+function learnIsolationPolicy(hostUrl, waitUntil) {
+  if (!hostUrl || hostUrl === isolationPolicyLearnedFrom) return;
+  isolationPolicyLearnedFrom = hostUrl;
+  const known = loadIsolationPolicy();
+  isolationPolicy = (async () => {
+    const res = await fetch(hostUrl, {
+      method: "HEAD",
+      cache: "no-store",
+      signal: AbortSignal.timeout(ISOLATION_PROBE_TIMEOUT_MS),
+    }).catch(() => null);
+    if (!res || !res.ok) {
+      if (isolationPolicyLearnedFrom === hostUrl) isolationPolicyLearnedFrom = null;
+      return known;
+    }
+    const policy = parseIsolationPolicy(res.headers.get("Document-Isolation-Policy"));
+    await known; // an earlier probe persists first, so the last announcement wins
+    await writeConfig(ISOLATION_POLICY_KEY, policy);
+    return policy;
+  })();
+  if (waitUntil) waitUntil(isolationPolicy);
+}
+
 // dir:'in' (kernel → tabs): broadcast an inbound ws/SSE frame to every TOP-LEVEL
 // preview client (in-app iframes get theirs via parent.postMessage, no dupes).
 function broadcastInboundFrame(d) {
@@ -180,6 +243,7 @@ self.addEventListener("message", (event) => {
   // handlePreview routes preview HTTP to it even when it's a nested iframe.
   if (d && d.type === "vv-kernel-host") {
     if (event.source && event.source.id) kernelHostIds.add(event.source.id);
+    learnIsolationPolicy(event.source && event.source.url, (p) => event.waitUntil(p));
     return;
   }
   if (d && d.type === "vv-keep-prefix-ports" && Array.isArray(d.ports)) {
@@ -1286,7 +1350,17 @@ function previewConnectingHtml(port) {
   );
 }
 
+// Every preview response leaves through here. DIP only means anything on a document.
 async function handlePreview(event, port, path, keepPrefix) {
+  const res = await servePreview(event, port, path, keepPrefix);
+  if (event.request.mode === "navigate") {
+    const policy = await loadIsolationPolicy();
+    if (policy) res.headers.set("Document-Isolation-Policy", policy);
+  }
+  return res;
+}
+
+async function servePreview(event, port, path, keepPrefix) {
   if (!Number.isInteger(port)) {
     return new Response("Bad preview URL\n", { status: 400 });
   }
