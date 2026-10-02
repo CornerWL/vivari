@@ -462,15 +462,18 @@ export class KernelBridge {
   /** The classic same-origin SW path (mode A, and mode-B pop-outs). */
   private async registerSameOriginServiceWorker(url: string): Promise<boolean> {
     await navigator.serviceWorker.register(url, { scope: "/" });
-    await navigator.serviceWorker.ready;
+    const registration = await navigator.serviceWorker.ready;
     // On a fresh load the document was fetched before the SW existed, so the page
     // isn't controlled yet even though the SW is active. Wait for `clients.claim()`
     // to take effect (controllerchange) so that preview iframes created afterwards
-    // are actually intercepted by the SW instead of escaping to the network.
+    // are actually intercepted by the SW instead of escaping to the network. A
+    // hard-reloaded page is uncontrolled too, with an SW that is long active and
+    // claims nothing unasked, so ask it.
     if (!navigator.serviceWorker.controller) {
       await new Promise<void>((resolve) => {
         const done = () => resolve();
         navigator.serviceWorker.addEventListener("controllerchange", done, { once: true });
+        registration.active?.postMessage({ type: "vv-claim" });
         setTimeout(done, 1000); // safety net: claim may already be in flight
       });
     }
