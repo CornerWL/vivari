@@ -3,6 +3,22 @@
 From 1.1.0 on, entries are generated from [changesets](https://github.com/changesets/changesets).
 `@vivari/core` and `@vivari/react` are released together under the same version.
 
+## 1.1.0
+
+### Minor Changes
+
+- [#9](https://github.com/maitrungduc1410/vivari/pull/9) [`973e503`](https://github.com/maitrungduc1410/vivari/commit/973e503c1b1a5e4c792635b2cc1bd8f43442f12e) Thanks [@ThailerL](https://github.com/ThailerL)! - Add a `connection` event (with the `ConnectionEvent` and `ConnectionListener` types) that fires when one process in the VM opens a TCP connection to a server in another, before either end can send anything. It reports the server's port, the connection's `remotePort`, both pids, and the client's still-running ancestors.
+
+- [#10](https://github.com/maitrungduc1410/vivari/pull/10) [`525b244`](https://github.com/maitrungduc1410/vivari/commit/525b24471aea1f15c8b97a675390421c7d827691) Thanks [@ThailerL](https://github.com/ThailerL)! - Previews now carry the host page's `Document-Isolation-Policy` (Chromium), so a same-origin preview lands in the page's agent cluster and its `contentWindow.location` stays readable. Declare the value with the new `BootOptions.documentIsolationPolicy` (the `DocumentIsolationPolicy` type, `"none"` for no header); left unset, the Service Worker learns it with a `HEAD` to the page's URL, without its query or fragment and without following redirects. Previews served to a cross-origin IDE (modes B and C) get no policy.
+
+### Patch Changes
+
+- [#9](https://github.com/maitrungduc1410/vivari/pull/9) [`973e503`](https://github.com/maitrungduc1410/vivari/commit/973e503c1b1a5e4c792635b2cc1bd8f43442f12e) Thanks [@ThailerL](https://github.com/ThailerL)! - A server accepting a connection from another process in the VM now sees a real `socket.remoteAddress` and `socket.remotePort`, which used to be `undefined`. The kernel picks the client's port from the ephemeral range, unique across the VM while the connection is open, so two processes dialing the same server no longer report the same `localPort`.
+
+- [`4898638`](https://github.com/maitrungduc1410/vivari/commit/48986382c7118534cd67489474efdbe207427dcf) Thanks [@maitrungduc1410](https://github.com/maitrungduc1410)! - A cross-process TCP dial that finds every client port in use now fails with `EADDRNOTAVAIL`, as on a real host, instead of `ECONNREFUSED`.
+
+- [#11](https://github.com/maitrungduc1410/vivari/pull/11) [`700ed05`](https://github.com/maitrungduc1410/vivari/commit/700ed05daea0b8ab8fe46aefeedfd1a9073d7ed2) Thanks [@ThailerL](https://github.com/ThailerL)! - A hard-reloaded page (Ctrl+Shift+R) has no Service Worker controller, so its previews used to go to the host's origin while `boot()` reported success. The page now asks the preview Service Worker to claim it. The standalone preview tab of modes B and C, `__vv-preview-boot.html`, does the same and comes back after a hard reload instead of waiting for a controller that never came.
+
 ## 1.0.3
 
 ### Patch Changes
