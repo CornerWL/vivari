@@ -271,6 +271,12 @@ self.addEventListener("message", (event) => {
     );
     return;
   }
+  // A hard-reloaded page has no controller and `activate` will not run again for
+  // it, so the page asks to be claimed.
+  if (d && d.type === "vv-claim") {
+    event.waitUntil(self.clients.claim());
+    return;
+  }
   if (d && d.type === "vv-keep-prefix-ports" && Array.isArray(d.ports)) {
     applyKeepPrefix(d.ports, (p) => event.waitUntil(p));
     return;

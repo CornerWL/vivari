@@ -381,6 +381,18 @@ console.log("\n12. no fixture carries a developer's home directory");
   );
 }
 
+console.log("\n13. a page can ask to be claimed");
+{
+  const ctx = loadSw();
+  let claims = 0;
+  ctx.self.clients.claim = async () => void claims++;
+  const waited = [];
+  const event = { data: { type: "vv-claim" }, waitUntil: (p) => waited.push(p) };
+  for (const fn of ctx.__listeners.message) fn(event);
+  ok(claims === 1, "vv-claim calls clients.claim()");
+  ok(waited.length === 1, "and holds the worker open until the claim settles");
+}
+
 console.log(
   failed === 0
     ? "\n✓ service worker routing holds"
