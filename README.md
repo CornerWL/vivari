@@ -195,8 +195,12 @@ Six teardowns of the problems that had to be solved, with the dead ends left in:
 - [Contributing guide](CONTRIBUTING.md) · [Code of Conduct](CODE_OF_CONDUCT.md)
 - Found a vulnerability? See [SECURITY.md](SECURITY.md).
 
-Releases are cut from the manual **Publish SDK** GitHub Actions workflow
-(`.github/workflows/publish.yml`).
+Releases are driven by [changesets](.changeset/README.md): the **Release** workflow
+(`.github/workflows/release.yml`) keeps a "chore: release" pull request up to date, and
+merging it publishes `@vivari/core` and `@vivari/react` to npm with trusted publishing
+and provenance. What changed in each version is in
+[packages/core/CHANGELOG.md](packages/core/CHANGELOG.md) and on the
+[releases page](https://github.com/maitrungduc1410/vivari/releases).
 
 ## License
 

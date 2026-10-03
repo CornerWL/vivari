@@ -103,6 +103,9 @@ overwrite the landing. Consequences worth knowing:
   `docs:`, `chore:`) are appreciated but not required.
 - Fill out the pull-request template so reviewers have context.
 - Make sure `verify` and `smoke` pass and there are no lint errors.
+- If the change reaches embedders of `@vivari/core` or `@vivari/react` (the SDK, the
+  runtime, the kernel or the preview Service Worker), add a changeset with
+  `npm run changeset`. See [.changeset/README.md](.changeset/README.md).
 
 ## License
 

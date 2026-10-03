@@ -11550,3 +11550,70 @@ tab) that is hard-reloaded reaches the host's server, which has no `/preview/*` 
 studio deploy, so it gets that server's fallback page; serving the boot page there is a
 separate change to the site assembly. Firefox and Safari are unmeasured. Nothing yet checks
 the page side of the claim in `bridge.ts`.
+
+## Releases come from changesets, and npm trusts the workflow instead of a token (this change)
+
+The manual **Publish SDK** workflow took a version as input and published with a long-lived
+`NPM_TOKEN` secret. The token is what npm now recommends against: anyone holding it can publish
+from anywhere, and nothing ties a tarball to the commit it was built from. The version input
+was also never written back, so the repository said `1.0.0` while npm served `1.0.3`, and the
+GitHub releases carried auto-generated PR lists instead of a changelog.
+
+`release.yml` replaces it, on the same model as node-scp-async. On every push to `master` it
+first looks for a version in the repository that npm does not have yet (the state right after
+a "chore: release" PR merges): it builds it, smoke-tests it and publishes it with
+`npm publish --provenance` over OIDC trusted publishing, then creates the GitHub release from
+the changelog sections with `scripts/release-notes.mjs`, attaching the tarballs npm serves.
+Last, `changesets/action` turns pending changesets into that "chore: release" PR, which bumps
+both packages and writes their `CHANGELOG.md`. No GitHub Environment: merging the release PR
+is the approval.
+
+Decisions, each because the default was wrong for this repo:
+- **Publishing comes before the changesets step and does not depend on it.** node-scp-async
+  publishes only when no changesets are pending. Here a release run that is cancelled (GitHub
+  keeps one pending run per concurrency group) or fails, followed by a merge that brings a
+  changeset, would have left the merged version unpublished for good. The job also runs on
+  `master` only: dispatched from a branch with hand-bumped versions, it would publish them.
+- **`@vivari/core` and `@vivari/react` are one `fixed` group.** They always shipped together.
+- **`onlyUpdatePeerDependentsWhenOutOfRange`, plus `scripts/version-packages.mjs`.** Without
+  the option, changesets answers any minor bump of core with a MAJOR bump of react, because
+  react names core as a peer. With it, a range that still matches is left alone, and that is
+  wrong the other way: react 1.1.0 re-exports `ConnectionEvent`, which core 1.0.3 does not
+  have, so `^1.0.3` would let TypeScript fail with TS2305. `version-packages` runs
+  `changeset version` and then moves react's peer floor to the version the two release under.
+  Checked by running it on the pending changesets against a stand-in GitHub API: both went to
+  1.1.0, react's peer and devDependency and the private example's dependency to `^1.1.0`.
+- **Each package is checked against npm on its own**, so a rerun after core published and
+  react failed ships only react. The Rust and Wasm toolchain installs only when something
+  will be published.
+- **`npm ci --ignore-scripts`, and npm pinned to `^11.5.1`.** Every step of the job can mint
+  the token npm accepts for publishing. Dependency install scripts are the part of that a
+  compromised package controls, so they do not run; the build steps that do run are ours and
+  the toolchain actions'.
+- **`@changesets/changelog-github`**, so an entry links its PR and thanks its author. A
+  changeset written after its PR merged names it with a `pr: #N` line. The five pending ones
+  cover PRs #9, #10 and #11 that way, and a fix pushed without a PR with `commit: <sha>`, so
+  1.1.0 will credit them.
+- **Release notes say when a hosted file changed.** An embedder serves `sw.js` (and in modes B
+  and C the preview origin's two HTML pages) from their own origin, so an `npm install` alone
+  does not update them. The notes compare those files with the previous release tag (a
+  prerelease is never the base of a release) and say what to copy again.
+- **`version-packages` pins `--registry=https://registry.npmjs.org`.** Run on a machine with a
+  mirror configured, the lockfile came back with the mirror's URLs in every `resolved` field.
+  `spike-ci-tiers` now fails on a lock entry resolved anywhere else, on a react peer floor
+  below the core version, and on a `release.yml` that names an npm token, drops
+  `--provenance`, publishes react before core, waits for changesets to run out before
+  publishing, or runs off `master`.
+
+The versions in the repository were brought up to `1.0.3`, and `CHANGELOG.md` was backfilled
+for 1.0.0 to 1.0.3 from the tags and the old release pages. `scripts/set-sdk-version.mjs` is
+gone: `changeset version` rewrites the internal dependency ranges, and
+`scripts/version-packages.mjs` the one peer floor it leaves.
+
+Needs doing on npmjs.com once, per package: add a trusted publisher (GitHub Actions,
+`maitrungduc1410/vivari`, workflow `release.yml`, no environment). After the first release
+publishes, set publishing access to "require two-factor authentication and disallow tokens"
+and delete the `NPM_TOKEN` secret. A release PR opened by `GITHUB_TOKEN` starts no CI run of
+its own, so its checks stay empty (branch protection that requires checks needs a bypass to
+merge it); what it changes is versions and changelogs, and the release job smoke-tests the
+build before publishing.

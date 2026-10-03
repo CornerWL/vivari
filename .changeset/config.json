@@ -1,0 +1,16 @@
+{
+  "$schema": "https://unpkg.com/@changesets/config@4.0.1/schema.json",
+  "baseBranch": "master",
+  "access": "public",
+  "changelog": ["@changesets/changelog-github", { "repo": "maitrungduc1410/vivari" }],
+  "commit": false,
+  "format": false,
+  "fixed": [["@vivari/core", "@vivari/react"]],
+  "linked": [],
+  "ignore": [],
+  "updateInternalDependencies": "patch",
+  "privatePackages": { "version": false, "tag": false },
+  "___experimentalUnsafeOptions_WILL_CHANGE_IN_PATCH": {
+    "onlyUpdatePeerDependentsWhenOutOfRange": true
+  }
+}

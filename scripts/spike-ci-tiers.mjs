@@ -325,7 +325,7 @@ console.log("\n== the Wasm build pins its wasm-pack ==");
 {
   const MIN = [0, 13, 1]; // 0.13.1 fetches binaryen 117, which parses two tables.
   const cmp = (a, b) => a[0] - b[0] || a[1] - b[1] || a[2] - b[2];
-  for (const wf of ["ci.yml", "publish.yml"]) {
+  for (const wf of ["ci.yml", "release.yml"]) {
     const uses = [...read(`.github/workflows/${wf}`)
       .matchAll(/jetli\/wasm-pack-action@[^\n]*\n\s+with:\n\s+version:\s*(\S+)/g)].map((m) => m[1]);
     ok(uses.length > 0, `${wf}: installs wasm-pack in ${uses.length} job(s)`);
@@ -338,6 +338,53 @@ console.log("\n== the Wasm build pins its wasm-pack ==");
       }
     }
   }
+}
+
+// ---------------------------------------------------------------------------
+console.log("\n== the release publishes with trusted publishing, and nothing else ==");
+// ---------------------------------------------------------------------------
+// npmjs.com trusts one workflow file to publish, through an OIDC token the job
+// mints. A stored token would bypass that, an old npm cannot do the exchange, and
+// any step of the job can mint the token, so dependency install scripts stay out
+// of it. Publishing must not wait for pending changesets: the next PR to bring one
+// would leave a merged release unpublished. The fixed group and the peer floor keep
+// @vivari/react on the core it re-exports types from.
+{
+  const wf = read(".github/workflows/release.yml");
+  ok(!/NPM_TOKEN|NODE_AUTH_TOKEN/.test(wf), "release.yml: no npm token, OIDC only");
+  ok(/\bid-token:\s*write\b/.test(wf), "release.yml: the job may mint an OIDC token");
+  ok(/^\s+if: github\.ref == 'refs\/heads\/master'$/m.test(wf), "release.yml: runs on master only, dispatched or pushed");
+  const npm = /npm install -g npm@\^?(\d+)\.(\d+)\.(\d+)/.exec(wf);
+  ok(!!npm && (+npm[1] > 11 || (+npm[1] === 11 && (+npm[2] > 5 || (+npm[2] === 5 && +npm[3] >= 1)))),
+    `release.yml: installs a pinned npm >= 11.5.1 for trusted publishing (got ${npm ? npm[0] : "none"})`);
+  ok(/npm ci --ignore-scripts/.test(wf), "release.yml: installs without running dependency scripts");
+  ok(!/has-changesets/.test(wf), "release.yml: publishing does not wait for the changesets to run out");
+  ok(wf.indexOf("npm publish") < wf.indexOf("changesets/action"),
+    "release.yml: publishes before the changesets step moves the tree to the release branch");
+  const publishes = [...wf.matchAll(/npm publish --workspace (\S+)[^\n]*/g)];
+  ok(publishes.map((m) => m[1]).join() === "@vivari/core,@vivari/react",
+    `release.yml: publishes @vivari/core, then @vivari/react (got ${publishes.map((m) => m[1]).join(", ")})`);
+  ok(publishes.every((m) => /--provenance/.test(m[0])), "release.yml: every publish carries provenance");
+
+  const config = JSON.parse(read(".changeset/config.json"));
+  const fixed = (config.fixed ?? []).find((g) => g.includes("@vivari/core")) ?? [];
+  ok(fixed.includes("@vivari/react"), ".changeset/config.json: @vivari/core and @vivari/react are one fixed group");
+  const coreVersion = JSON.parse(read("packages/core/package.json")).version;
+  const peer = JSON.parse(read("packages/react/package.json")).peerDependencies?.["@vivari/core"];
+  ok(peer === `^${coreVersion}`,
+    `@vivari/react's peer range starts at the core it releases with (^${coreVersion}, got ${peer})`);
+  ok(JSON.parse(read("package.json")).scripts?.["version-packages"] === "node scripts/version-packages.mjs",
+    "package.json: version-packages runs scripts/version-packages.mjs, which moves that floor");
+
+  // The lockfile is rewritten by `npm run version-packages`; run against a mirror,
+  // it would ship the mirror's URLs to every contributor.
+  const lock = JSON.parse(read("package-lock.json"));
+  const foreign = Object.entries(lock.packages ?? {})
+    .filter(([, p]) => p.resolved && !p.link && !p.resolved.startsWith("https://registry.npmjs.org/"))
+    .map(([k]) => k);
+  ok(foreign.length === 0, foreign.length
+    ? `package-lock.json resolves off the public registry: ${foreign.slice(0, 5).join(", ")}`
+    : "package-lock.json resolves every package from registry.npmjs.org");
 }
 
 // ---------------------------------------------------------------------------

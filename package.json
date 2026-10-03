@@ -60,10 +60,14 @@
     "assemble:worker": "node scripts/assemble-worker.mjs",
     "build:sdk": "npm run build:core && npm run build:react",
     "typecheck:sdk": "npm run typecheck --workspace @vivari/core && npm run typecheck --workspace @vivari/react",
+    "changeset": "changeset",
+    "version-packages": "node scripts/version-packages.mjs",
     "og": "node scripts/og-cards.mjs",
     "og:check": "node scripts/og-cards.mjs --check"
   },
   "devDependencies": {
+    "@changesets/changelog-github": "^1.0.1",
+    "@changesets/cli": "^3.0.3",
     "@resvg/resvg-js": "^2.6.2"
   }
 }

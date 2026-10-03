@@ -1,0 +1,177 @@
+name: Release
+
+# One job does the whole release, and every step can be rerun safely:
+#   1. A version in packages/*/package.json that npm does not have yet (after merging
+#      the "chore: release" pull request): build it and publish it with trusted
+#      publishing (OIDC), so no npm token is stored in the repository. Each package is
+#      checked on its own, so a rerun after a partial publish ships only the missing one.
+#   2. Create the GitHub release vX.Y.Z from the CHANGELOG.md sections, with the
+#      tarballs npm serves attached.
+#   3. Pending changesets: open or update the "chore: release" pull request that bumps
+#      @vivari/core and @vivari/react together and writes their CHANGELOG.md.
+#
+# Publishing comes first and does not wait for the changesets to run out: a run that
+# was cancelled or failed after a release PR merged must not be skipped for good by
+# the next PR that brings a changeset.
+#
+# npmjs.com must list this file (release.yml) as the trusted publisher of both
+# packages; renaming it breaks publishing until that setting is changed too.
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Release
+    # A dispatch from another branch would publish that branch's versions.
+    if: github.ref == 'refs/heads/master'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # The release notes compare against the previous v* tag.
+          fetch-depth: 0
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+          registry-url: https://registry.npmjs.org
+      # Trusted publishing needs npm 11.5.1 or newer; Node 22 ships npm 10.
+      - run: npm install -g npm@^11.5.1
+      # Every step of this job can mint the OIDC token npm accepts for publishing, so
+      # the dependency tree's install scripts do not run here at all.
+      - run: npm ci --ignore-scripts
+
+      - id: plan
+        name: Decide what to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="$(node -p "require('./packages/core/package.json').version")"
+          react="$(node -p "require('./packages/react/package.json').version")"
+          if [ "$react" != "$version" ]; then
+            echo "::error::@vivari/core is $version but @vivari/react is $react; they are released together"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          publish=false
+          for name in @vivari/core @vivari/react; do
+            key="publish_${name#@vivari/}"
+            if npm view "$name@$version" version > /dev/null 2>&1; then
+              echo "$key=false" >> "$GITHUB_OUTPUT"
+              echo "$name@$version is already on npm"
+            else
+              echo "$key=true" >> "$GITHUB_OUTPUT"
+              publish=true
+            fi
+          done
+          echo "publish=$publish" >> "$GITHUB_OUTPUT"
+          if gh release view "v$version" > /dev/null 2>&1; then
+            echo "release=false" >> "$GITHUB_OUTPUT"
+            echo "GitHub release v$version already exists"
+          else
+            echo "release=true" >> "$GITHUB_OUTPUT"
+          fi
+          case "$version" in
+            *-*) echo "tag=next" >> "$GITHUB_OUTPUT"; echo "prerelease=true" >> "$GITHUB_OUTPUT" ;;
+            *) echo "tag=latest" >> "$GITHUB_OUTPUT"; echo "prerelease=false" >> "$GITHUB_OUTPUT" ;;
+          esac
+
+      # The SDK bundles three Wasm crates (VFS, codec, crypto) as assets.
+      - name: Setup Rust
+        if: steps.plan.outputs.publish == 'true'
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - name: Install wasm-pack
+        if: steps.plan.outputs.publish == 'true'
+        uses: jetli/wasm-pack-action@v0.4.0
+        with:
+          version: v0.13.1
+      - name: Cache cargo
+        if: steps.plan.outputs.publish == 'true'
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            packages/*/target
+          key: cargo-${{ runner.os }}-${{ hashFiles('packages/*/Cargo.lock') }}
+
+      # With dist built, the smoke test's runtime leg imports the bundled ESM and
+      # exercises the public API before anything is published.
+      - name: Build and check the packages
+        if: steps.plan.outputs.publish == 'true'
+        run: |
+          npm run build:vfs
+          npm run build:codec
+          npm run build:crypto
+          npm run build:sdk
+          npm run smoke
+
+      # @vivari/react names @vivari/core as a peer, so core goes first.
+      - name: Publish @vivari/core to npm
+        if: steps.plan.outputs.publish_core == 'true'
+        run: npm publish --workspace @vivari/core --access public --provenance --tag "${{ steps.plan.outputs.tag }}"
+      - name: Publish @vivari/react to npm
+        if: steps.plan.outputs.publish_react == 'true'
+        run: npm publish --workspace @vivari/react --access public --provenance --tag "${{ steps.plan.outputs.tag }}"
+
+      - name: Create the GitHub release
+        if: steps.plan.outputs.release == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.plan.outputs.version }}
+          PRERELEASE: ${{ steps.plan.outputs.prerelease }}
+        run: |
+          node scripts/release-notes.mjs "$VERSION" > "$RUNNER_TEMP/notes.md"
+          # Attach the tarballs npm serves, not local rebuilds, so they are the bytes
+          # the provenance attests. A version just published can take a moment to show.
+          # Packed outside the workspace so the spec resolves on the registry.
+          mkdir -p "$RUNNER_TEMP/tarballs"
+          (
+            cd "$RUNNER_TEMP/tarballs"
+            for name in @vivari/core @vivari/react; do
+              for attempt in 1 2 3 4 5 6; do
+                npm pack "$name@$VERSION" > /dev/null && break
+                [ "$attempt" = 6 ] && { echo "::error::$name@$VERSION is not on npm"; exit 1; }
+                sleep 10
+              done
+            done
+          )
+          flags=()
+          [ "$PRERELEASE" = "true" ] && flags+=(--prerelease)
+          gh release create "v$VERSION" --target "$GITHUB_SHA" --title "v$VERSION" \
+            --notes-file "$RUNNER_TEMP/notes.md" "${flags[@]}" "$RUNNER_TEMP"/tarballs/*.tgz
+
+      # The action commits the whole working tree into the release PR, so nothing the
+      # build wrote may be tracked.
+      - name: The working tree is clean
+        run: |
+          if [ -n "$(git status --porcelain)" ]; then
+            git status --short
+            echo "::error::the build left changes the release PR would commit"
+            exit 1
+          fi
+      # Last, because it leaves the working tree on the release branch with the bumped
+      # versions.
+      - name: Open the release pull request
+        uses: changesets/action@v2
+        with:
+          version-script: npm run version-packages
+          commit-message: "chore: release"
+          pr-title: "chore: release"
+        env:
+          # @changesets/changelog-github reads it to link each entry to its PR and author.
+          GITHUB_TOKEN: ${{ github.token }}
