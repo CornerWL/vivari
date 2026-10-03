@@ -1,16 +1,19 @@
 #!/usr/bin/env node
 // Prints the body of the GitHub release for one SDK version, built from the
 // CHANGELOG.md sections changesets wrote for it.
-// Usage: node scripts/release-notes.mjs 1.2.3
+// Usage: node scripts/release-notes.mjs 1.2.3 [commit]
 //
-// The previous release is the highest `v*` tag below the version, so run it in a
-// checkout that has the tags (the release workflow fetches with `fetch-depth: 0`).
+// `commit` is the one the release is cut from (default HEAD); the hosted files are
+// compared up to it. The previous release is the highest `v*` tag below the version,
+// so run it in a checkout that has the tags (the release workflow fetches with
+// `fetch-depth: 0`).
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 
 const version = process.argv[2];
+const ref = process.argv[3] || "HEAD";
 if (!version) {
-  console.error("usage: node scripts/release-notes.mjs <version>");
+  console.error("usage: node scripts/release-notes.mjs <version> [commit]");
   process.exit(2);
 }
 
@@ -103,7 +106,7 @@ function previousTag() {
 
 function changedHostedFiles(since) {
   if (!since) return [];
-  return git("diff", "--name-only", since, "HEAD", "--", ...HOSTED_FILES).split("\n").filter(Boolean);
+  return git("diff", "--name-only", since, ref, "--", ...HOSTED_FILES).split("\n").filter(Boolean);
 }
 
 const sections = PACKAGES.map((pkg) => ({ ...pkg, notes: section(pkg) }));

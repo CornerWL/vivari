@@ -13,8 +13,9 @@ write one or two sentences for the changelog, from the embedder's side. The two 
 always release together under one version. Changes to the studio, the docs, the blog or
 CI need no changeset.
 
-The release workflow turns pending changesets into a "chore: release" pull request.
-Merging that pull request publishes both packages to npm and creates the GitHub release.
+The release workflow turns pending changesets into a "chore: release vX.Y.Z" pull request
+from the branch `release/vX.Y.Z`; its description previews the GitHub release. Merging it
+publishes both packages to npm and creates that release.
 
 A changeset written after its pull request merged can say which one it belongs to, so the
 changelog links it and thanks its author. Put the line first in the summary:

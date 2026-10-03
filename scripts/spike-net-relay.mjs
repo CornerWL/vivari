@@ -342,7 +342,7 @@ resetter.close();
 const s = net.connect(${blast.address().port}, "host.vivari.internal", () => {
   s.pause();
   console.log("SLOW paused");
-  setTimeout(() => { console.log("SLOW resume"); s.resume(); }, 1500);
+  setTimeout(() => { console.log("SLOW resume"); s.resume(); }, 5000);
 });
 let got = 0, bad = 0;
 s.on("data", (d) => {
@@ -355,8 +355,9 @@ setTimeout(() => { console.log("SLOW TIMEOUT got " + got); process.exit(2); }, 6
 `,
   );
   const slow = kernel.start("node", ["/slow.js"], { cwd: "/", env });
-  // Sample 1s into the guest's 1.5s pause: after the resume the transfer runs at
-  // full speed, and a sample taken then measures the poll interval, not the window.
+  // Sample 1s into the guest's 5s pause: after the resume the transfer runs at full
+  // speed, and a sample taken then measures the poll interval, not the window. The
+  // 4s of slack is for a loaded runner, where "SLOW paused" reaches the poll late.
   await waitFor(() => has(/SLOW paused/), "the slow reader to connect and pause", 15000).catch(() => {});
   await sleep(1000);
   intoTabWhilePaused = has(/SLOW resume/) ? -1 : intoTab;
@@ -364,6 +365,7 @@ setTimeout(() => { console.log("SLOW TIMEOUT got " + got); process.exit(2); }, 6
   hooks.onData = realOnData;
   blast.close();
   const mb = (n) => (n / 1048576).toFixed(1) + " MB";
+  check(intoTabWhilePaused !== -1, "the flow-control sample was taken while the guest was still paused");
   check(
     intoTabWhilePaused > 0 && intoTabWhilePaused <= 8 * 1048576,
     `guest not reading → only ${mb(intoTabWhilePaused)} of ${mb(TOTAL)} reaches the tab (relay stops reading TCP)`,

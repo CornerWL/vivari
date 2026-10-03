@@ -2,13 +2,13 @@ name: Release
 
 # One job does the whole release, and every step can be rerun safely:
 #   1. A version in packages/*/package.json that npm does not have yet (after merging
-#      the "chore: release" pull request): build it and publish it with trusted
-#      publishing (OIDC), so no npm token is stored in the repository. Each package is
-#      checked on its own, so a rerun after a partial publish ships only the missing one.
-#   2. Create the GitHub release vX.Y.Z from the CHANGELOG.md sections, with the
-#      tarballs npm serves attached.
-#   3. Pending changesets: open or update the "chore: release" pull request that bumps
-#      @vivari/core and @vivari/react together and writes their CHANGELOG.md.
+#      a release pull request): build it and publish it with trusted publishing (OIDC),
+#      so no npm token is stored in the repository. Each package is checked on its own,
+#      so a rerun after a partial publish ships only the missing one.
+#   2. Create the GitHub release vX.Y.Z from the CHANGELOG.md sections.
+#   3. Pending changesets: open or update the "chore: release vX.Y.Z" pull request,
+#      from branch release/vX.Y.Z, that bumps @vivari/core and @vivari/react together
+#      and writes their CHANGELOG.md.
 #
 # Publishing comes first and does not wait for the changesets to run out: a run that
 # was cancelled or failed after a release PR merged must not be skipped for good by
@@ -120,13 +120,21 @@ jobs:
           npm run build:sdk
           npm run smoke
 
-      # @vivari/react names @vivari/core as a peer, so core goes first.
+      # @vivari/react names @vivari/core as a peer, so core goes first. Nothing waits for
+      # npm to make them installable: its automated review held core 1.1.0 in
+      # "Validating" for over an hour, and npm view does not see a version until then.
+      # So a rerun in that window publishes it again, and "previously published" means
+      # npm has it.
       - name: Publish @vivari/core to npm
         if: steps.plan.outputs.publish_core == 'true'
-        run: npm publish --workspace @vivari/core --access public --provenance --tag "${{ steps.plan.outputs.tag }}"
+        run: |
+          npm publish --workspace @vivari/core --access public --provenance --tag "${{ steps.plan.outputs.tag }}" 2>&1 \
+            | tee "$RUNNER_TEMP/npm.log" || grep -q "previously published" "$RUNNER_TEMP/npm.log"
       - name: Publish @vivari/react to npm
         if: steps.plan.outputs.publish_react == 'true'
-        run: npm publish --workspace @vivari/react --access public --provenance --tag "${{ steps.plan.outputs.tag }}"
+        run: |
+          npm publish --workspace @vivari/react --access public --provenance --tag "${{ steps.plan.outputs.tag }}" 2>&1 \
+            | tee "$RUNNER_TEMP/npm.log" || grep -q "previously published" "$RUNNER_TEMP/npm.log"
 
       - name: Create the GitHub release
         if: steps.plan.outputs.release == 'true'
@@ -135,28 +143,17 @@ jobs:
           VERSION: ${{ steps.plan.outputs.version }}
           PRERELEASE: ${{ steps.plan.outputs.prerelease }}
         run: |
-          node scripts/release-notes.mjs "$VERSION" > "$RUNNER_TEMP/notes.md"
-          # Attach the tarballs npm serves, not local rebuilds, so they are the bytes
-          # the provenance attests. A version just published can take a moment to show.
-          # Packed outside the workspace so the spec resolves on the registry.
-          mkdir -p "$RUNNER_TEMP/tarballs"
-          (
-            cd "$RUNNER_TEMP/tarballs"
-            for name in @vivari/core @vivari/react; do
-              for attempt in 1 2 3 4 5 6; do
-                npm pack "$name@$VERSION" > /dev/null && break
-                [ "$attempt" = 6 ] && { echo "::error::$name@$VERSION is not on npm"; exit 1; }
-                sleep 10
-              done
-            done
-          )
+          # The tag goes on the commit that set the version (the merged release PR), not
+          # on whatever later push ran this job after an earlier run failed.
+          target="$(git log -1 --first-parent --diff-merges=first-parent -s --format=%H -G'"version":' -- packages/core/package.json)"
+          node scripts/release-notes.mjs "$VERSION" "$target" > "$RUNNER_TEMP/notes.md"
           flags=()
           [ "$PRERELEASE" = "true" ] && flags+=(--prerelease)
-          gh release create "v$VERSION" --target "$GITHUB_SHA" --title "v$VERSION" \
-            --notes-file "$RUNNER_TEMP/notes.md" "${flags[@]}" "$RUNNER_TEMP"/tarballs/*.tgz
+          gh release create "v$VERSION" --target "$target" --title "v$VERSION" \
+            --notes-file "$RUNNER_TEMP/notes.md" "${flags[@]}"
 
-      # The action commits the whole working tree into the release PR, so nothing the
-      # build wrote may be tracked.
+      # The release PR commits the whole working tree, so nothing the build wrote may
+      # be tracked.
       - name: The working tree is clean
         run: |
           if [ -n "$(git status --porcelain)" ]; then
@@ -164,14 +161,58 @@ jobs:
             echo "::error::the build left changes the release PR would commit"
             exit 1
           fi
-      # Last, because it leaves the working tree on the release branch with the bumped
-      # versions.
+
+      # Last, because it moves the working tree onto the release branch. The branch and
+      # the title name the version (release/v1.2.3, "chore: release v1.2.3"); when more
+      # changesets move the version, the PR for the old one is closed for the new one.
       - name: Open the release pull request
-        uses: changesets/action@v2
-        with:
-          version-script: npm run version-packages
-          commit-message: "chore: release"
-          pr-title: "chore: release"
         env:
+          GH_TOKEN: ${{ github.token }}
           # @changesets/changelog-github reads it to link each entry to its PR and author.
           GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          # Only this repository's branches: a fork's PR can come from a branch of the same name.
+          open="$(gh pr list --state open --base master --limit 100 --json number,headRefName,isCrossRepository \
+            --jq '.[] | select((.isCrossRepository | not) and (.headRefName | startswith("release/v"))) | "\(.number) \(.headRefName)"')"
+          if [ -z "$(find .changeset -maxdepth 1 -name '*.md' ! -name README.md)" ]; then
+            echo "No pending changesets."
+            while read -r number head; do
+              if [ -n "$number" ]; then
+                gh pr close "$number" --delete-branch --comment "No changesets are pending any more."
+              fi
+            done <<< "$open"
+            exit 0
+          fi
+
+          npm run version-packages
+          version="$(node -p "require('./packages/core/package.json').version")"
+          branch="release/v$version"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -B "$branch"
+          git add -A
+          git commit -q -m "chore: release v$version"
+          git push --force origin "$branch"
+
+          {
+            echo "Merging this pull request publishes \`@vivari/core\` and \`@vivari/react\` v$version to npm"
+            echo "and creates the GitHub release below. More changesets merged before then are added here."
+            echo
+            echo "---"
+            echo
+            node scripts/release-notes.mjs "$version"
+          } > "$RUNNER_TEMP/pr.md"
+          title="chore: release v$version"
+          number="$(gh pr list --state open --head "$branch" --json number,isCrossRepository \
+            --jq '[.[] | select(.isCrossRepository | not)][0].number // empty')"
+          if [ -n "$number" ]; then
+            gh pr edit "$number" --title "$title" --body-file "$RUNNER_TEMP/pr.md"
+          else
+            url="$(gh pr create --base master --head "$branch" --title "$title" --body-file "$RUNNER_TEMP/pr.md")"
+            number="${url##*/}"
+          fi
+          while read -r old head; do
+            if [ -n "$old" ] && [ "$head" != "$branch" ]; then
+              gh pr close "$old" --delete-branch --comment "Superseded by #$number (v$version)."
+            fi
+          done <<< "$open"

@@ -196,7 +196,7 @@ Six teardowns of the problems that had to be solved, with the dead ends left in:
 - Found a vulnerability? See [SECURITY.md](SECURITY.md).
 
 Releases are driven by [changesets](.changeset/README.md): the **Release** workflow
-(`.github/workflows/release.yml`) keeps a "chore: release" pull request up to date, and
+(`.github/workflows/release.yml`) keeps a "chore: release vX.Y.Z" pull request up to date, and
 merging it publishes `@vivari/core` and `@vivari/react` to npm with trusted publishing
 and provenance. What changed in each version is in
 [packages/core/CHANGELOG.md](packages/core/CHANGELOG.md) and on the

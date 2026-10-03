@@ -359,12 +359,17 @@ console.log("\n== the release publishes with trusted publishing, and nothing els
     `release.yml: installs a pinned npm >= 11.5.1 for trusted publishing (got ${npm ? npm[0] : "none"})`);
   ok(/npm ci --ignore-scripts/.test(wf), "release.yml: installs without running dependency scripts");
   ok(!/has-changesets/.test(wf), "release.yml: publishing does not wait for the changesets to run out");
-  ok(wf.indexOf("npm publish") < wf.indexOf("changesets/action"),
-    "release.yml: publishes before the changesets step moves the tree to the release branch");
+  const versionStep = wf.indexOf("npm run version-packages");
+  ok(versionStep > 0 && wf.indexOf("npm publish") < versionStep,
+    "release.yml: publishes before the release-PR step moves the tree to the release branch");
+  ok(/branch="release\/v\$version"/.test(wf) && /title="chore: release v\$version"/.test(wf),
+    "release.yml: the release PR's branch and title name the version");
   const publishes = [...wf.matchAll(/npm publish --workspace (\S+)[^\n]*/g)];
   ok(publishes.map((m) => m[1]).join() === "@vivari/core,@vivari/react",
     `release.yml: publishes @vivari/core, then @vivari/react (got ${publishes.map((m) => m[1]).join(", ")})`);
   ok(publishes.every((m) => /--provenance/.test(m[0])), "release.yml: every publish carries provenance");
+  ok(publishes.every((m) => wf.slice(m.index, m.index + 300).includes('|| grep -q "previously published"')),
+    "release.yml: a rerun while npm still validates a version does not fail on publishing it again");
 
   const config = JSON.parse(read(".changeset/config.json"));
   const fixed = (config.fixed ?? []).find((g) => g.includes("@vivari/core")) ?? [];

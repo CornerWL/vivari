@@ -361,7 +361,7 @@ README.md · roadmap.md · research.md · ARCHITECTURE.md · AGENTS.md
    `@vivari/core` or `@vivari/react` (the SDK, the runtime, the kernel, the preview
    SW) adds one with `npm run changeset` (see `.changeset/README.md`). Never edit a
    package `version` or `CHANGELOG.md` by hand: `release.yml` turns changesets into a
-   "chore: release" PR, and merging it publishes over OIDC trusted publishing, with no
+   "chore: release vX.Y.Z" PR, and merging it publishes over OIDC trusted publishing, with no
    npm token anywhere. `npm run version-packages` also moves react's `@vivari/core` peer
    floor to the release version (react re-exports core's types) and rewrites
    `package-lock.json` against registry.npmjs.org on purpose; a lock resolved from a

@@ -11617,3 +11617,45 @@ and delete the `NPM_TOKEN` secret. A release PR opened by `GITHUB_TOKEN` starts 
 its own, so its checks stay empty (branch protection that requires checks needs a bypass to
 merge it); what it changes is versions and changelogs, and the release job smoke-tests the
 build before publishing.
+
+## The first release through `release.yml`: what 1.1.0 showed (this change)
+
+Merging the release PR ran the job end to end. Both `npm publish` steps exited 0, and
+`@vivari/react@1.1.0` was installable two minutes later. `@vivari/core@1.1.0` was not: npm's
+automated review held it in "Validating" for over an hour (npmjs.com shows the state to the
+owner; `npm view` answers 404 until it ends). The GitHub release step, which waited 60 s for
+`npm pack @vivari/core@1.1.0`, failed on ETARGET. npm's review takes as long as it takes, and
+core (26 files, 7.7 MB with three Wasm binaries) gets a longer one than react (64 KB), so the
+job no longer waits on npm at all:
+- **The GitHub release is created right after publishing**, with notes only. The tarballs it
+  attached came from npm, and npm is where they are installed from.
+- **A rerun does not fail on a version npm is still validating.** The plan cannot tell such a
+  version from a missing one, so it publishes it again; npm answers "previously published",
+  which the publish step takes as done.
+- **The cost is a window** in which `@vivari/react@<new>` is installable and the core it
+  names as a peer is not. Installing react fails then, rather than installing something
+  wrong, and ends when npm finishes the review.
+- **The tag goes on the commit that set the version**, found as the newest first-parent
+  commit touching the `"version"` line of `packages/core/package.json`. A rerun from a later
+  push used to tag that push instead. `release-notes.mjs` takes the commit too, so the
+  hosted-file note compares up to it.
+
+The release PR now names its version. `changesets/action` fixes the branch at
+`changeset-release/master` and the title at whatever `pr-title` says, before the version is
+known, so the step is a script of its own: it runs `version-packages`, commits to
+`release/v<version>`, opens or updates "chore: release v<version>" with the release notes as
+its description, and closes the PR of an older version as superseded. With no changesets
+pending it closes any release PR still open. Exercised against a stand-in `gh` and a local
+remote: a patch changeset produced `release/v1.1.1`, its PR, and the close of the old one.
+
+`verify` had been red on every push since 2026-10-03 04:35, release work or not, at the step
+running the Wasm-VFS offline spikes:
+- **`constants`** compared `OPENSSL_VERSION_NUMBER` exactly, and Node 22.23.3 (2026-09-23)
+  moved the host from OpenSSL 3.5.7 to 3.5.8. The VM links no OpenSSL, so its pinned value
+  cannot follow a Node patch; the spike now compares the major and minor only.
+- **`net-relay`** failed on CI and passed on 22.23.2 and 22.23.3 here. Which check failed is
+  not in the part of the log we have. The one with the least slack sampled the flow-control
+  window 1 s after seeing "SLOW paused", in a guest that resumed 1.5 s after printing it;
+  the guest now pauses 5 s. If CI still fails, the check's own line names it.
+
+Still open: nothing in the job can shorten npm's review of core.

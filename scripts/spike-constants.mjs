@@ -114,13 +114,20 @@ const runVm = async (f) => {
 const host = JSON.parse(runHost("dump.js"));
 const vm = JSON.parse(await runVm("dump.js"));
 
+// OPENSSL_VERSION_NUMBER is the build of OpenSSL the host's Node links, 0xMNN00PP0,
+// and moves with every Node patch release (22.23.3 took 3.5.7 to 3.5.8). The VM
+// links no OpenSSL, so its table pins one; the release line is what a caller can
+// branch on, and the patch is compared away.
+const SAME = { OPENSSL_VERSION_NUMBER: (a, b) => a >>> 20 === b >>> 20 };
+const same = (k, a, b) => (SAME[k] && typeof a === "number" && typeof b === "number" ? SAME[k](a, b) : a === b);
+
 console.log("constant tables, against the host:\n");
 for (const label of Object.keys(host)) {
   const H = host[label];
   const V = vm[label] || {};
   const missing = Object.keys(H).filter((k) => !(k in V));
   const extra = Object.keys(V).filter((k) => !(k in H));
-  const differ = Object.keys(H).filter((k) => k in V && V[k] !== H[k]);
+  const differ = Object.keys(H).filter((k) => k in V && !same(k, V[k], H[k]));
   const clean = !missing.length && !extra.length && !differ.length;
   ok(clean, `${label} — ${Object.keys(H).length} names, values included`);
   if (missing.length)
