@@ -84,7 +84,7 @@
           .then(function () {
             return navigator.serviceWorker.ready;
           })
-          .then(function () {
+          .then(function (registration) {
             // Wait until the SW actually controls this document (clients.claim),
             // so posting to `controller` below can't be a no-op.
             if (navigator.serviceWorker.controller) return;
@@ -93,6 +93,10 @@
                 resolve();
               };
               navigator.serviceWorker.addEventListener("controllerchange", done, { once: true });
+              // An SW that is already active claims nothing unasked. Chrome controls a
+              // frame whenever its SW is already active, even under a hard-reloaded
+              // page, so this is for other engines.
+              if (registration.active) registration.active.postMessage({ type: "vv-claim" });
               setTimeout(done, 1500);
             });
           })

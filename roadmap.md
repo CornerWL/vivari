@@ -11506,3 +11506,47 @@ Wasm-free) drives the real `sw.js` under `vm`, including the redirect, token, de
 cross-origin and overlapping-announcement cases, each of which fails on the PR's original
 probe. A declared value is trusted as given, so it has to match the header the page is
 really served with.
+
+## A hard-reloaded page asks the preview SW to claim it (this change)
+
+A forced reload (Shift+Reload) bypasses the Service Worker for that load and leaves the page
+uncontrolled, and the SW claimed clients only in `activate`, which does not run again for an
+active worker. The page then stayed uncontrolled: `vv-kernel-host`, the declared
+`Document-Isolation-Policy` and ws/SSE frames for pop-outs all go through
+`navigator.serviceWorker.controller` and were dropped while `boot()` reported success. GitHub
+PR #11 has the page post `vv-claim` and the SW answer with `clients.claim()`. Measured in
+Chrome 143: before it, the page's own requests reached the network; iframes it created were
+still intercepted, since their navigations match the registration on their own.
+
+Review found the same gap on the mode-B/C standalone preview tab, the one place
+`worker/src/index.js` already said a hard reload was handled: the boot page waited for control
+that never came and showed "The preview runtime didn't take control". It now asks for the
+claim too. Two more things stood between it and a working tab, both found only in a real
+Chrome:
+- **Its reload guard was once per tab.** The flag set on the tab's first boot was still in
+  `sessionStorage` when a hard reload brought the tab back, so a claimed page sat at "Waiting
+  for your Vivari project tab". It now reloads when that load gained control. A load whose
+  navigation started within 3 s of its own reload is that reload landing back on the boot
+  page, so it stops there and says to reload normally, which still ends a loop where every
+  load bypasses the SW (DevTools' "Bypass for network"). Two first cuts were wrong: a 10 s
+  window caught a hard reload a few seconds after opening the tab, and a 3 s window timed
+  from when the script ran counted the download, so a boot page slower than 3 s to arrive
+  reloaded forever. With storage blocked there is no record of the reload, so it never
+  reloads by itself.
+- **Chrome restored the spent boot page from the back/forward cache** on the forced reload of a
+  tab it had already booted, with its script already run, so the tab sat at "Registering the
+  preview runtime". A `pageshow` handler reloads a restored copy.
+
+Gate: `spike-sw-routing` case 13 (the SW claims on `vv-claim`) and
+`scripts/repro-preview-hard-reload.mjs`, which serves a preview origin the way the Worker does
+and hard-reloads a standalone tab in a real Chrome. It needs a Chrome binary, so it is run by
+hand like `repro-starlight-browser.mjs`; each of the three boot-page fixes and the SW handler
+fails it when removed. `__vv-bridge.html` asks for the claim too, for engines that do not
+control its frame on their own (Chrome does).
+
+Still true: an embedder's hosted `sw.js` must be refreshed to answer `vv-claim`, and an older
+copy leaves the page as it was. A same-origin pop-out (`<host>/preview/<port>/` in its own
+tab) that is hard-reloaded reaches the host's server, which has no `/preview/*` route on the
+studio deploy, so it gets that server's fallback page; serving the boot page there is a
+separate change to the site assembly. Firefox and Safari are unmeasured. Nothing yet checks
+the page side of the claim in `bridge.ts`.

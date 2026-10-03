@@ -1707,6 +1707,19 @@ as the default.
 
 `scripts/spike-sw-routing.mjs` drives the real `sw.js` under `vm` and gates all of it.
 
+### A hard-reloaded page is uncontrolled, and `activate` will not claim it
+Shift+Reload bypasses the SW for that load, and the SW only called `clients.claim()` in
+`activate`, which never runs again for a worker that is already active. So the page comes
+back with `navigator.serviceWorker.controller === null` for good: every
+`controller?.postMessage` (`vv-kernel-host`, the declared DIP, ws/SSE for pop-outs) is
+silently dropped while `boot()` reports success. In Chrome, iframes the page creates are
+still intercepted, which is why it looks fine at a glance (other engines unmeasured). Any
+page that waits for control must ask for it: post `vv-claim` to `registration.active`
+(`registerSameOriginServiceWorker`, `__vv-preview-boot.html`, `__vv-bridge.html`). A page whose job ends in `location.reload()` also needs a
+`pageshow` handler: Chrome can hand the tab back from the back/forward cache with its
+script already spent. Node cannot show any of this; `scripts/repro-preview-hard-reload.mjs`
+drives a real Chrome.
+
 ### A guest that emits root-absolute NAVIGATION URLs escapes the preview
 Under path routing (modes A/B) a preview lives at `<origin>/preview/<port>/`, and
 the SW strips that prefix before the kernel sees the request, handing it back as

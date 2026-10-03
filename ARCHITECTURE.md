@@ -777,6 +777,23 @@ imperatively in an effect; `registerServiceWorker()` additionally waits for
 `controllerchange` when the page isn't yet controlled. Both ensure the SW proxies
 the very first preview navigation instead of the app leaking through.
 
+**A hard reload leaves the page uncontrolled.** A forced reload (Shift+Reload) bypasses
+the SW for that one load, so the document comes back with no controller, and an SW that
+is already active never runs `activate` again to claim it. In Chrome, iframes the page
+creates are still intercepted, since their own navigations match the registration (other
+engines unmeasured, so `__vv-bridge.html` asks for the claim too); what is lost is
+everything sent through `navigator.serviceWorker.controller`: `vv-kernel-host` (and the
+declared DIP with it), ws/SSE frames for pop-outs, and the page's own requests. So
+`registerServiceWorker()` posts `vv-claim` to the active worker when the page is
+uncontrolled, and the SW answers with `clients.claim()`. The mode-B/C standalone boot page
+(`__vv-preview-boot.html`) asks the same, then reloads when that load gained control,
+not once per tab, which a hard reload of an already-booted tab would hit. A load whose
+navigation started (`performance.timeOrigin`) within 3 s of the page's own reload is that
+reload landing back here, so it stops instead: that ends a loop where every load bypasses
+the SW (DevTools' "Bypass for network"), however slow the page is to download. A copy restored from the back/forward cache reloads, because Chrome hands one
+back on the forced reload of a tab the page has already booted. Gates: `spike-sw-routing` case 13
+(the SW side) and `scripts/repro-preview-hard-reload.mjs` (real Chrome, run by hand).
+
 **Separate preview origin (mode B) — opt-in isolation.** By default previews run
 *same-origin* with the IDE (the SW is registered on the studio origin; `findKernelClient()`
 reaches the kernel via same-origin window clients). A deploy can instead serve previews from a
