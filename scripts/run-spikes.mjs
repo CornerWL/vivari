@@ -178,6 +178,9 @@ const SPIKES = [
   // app and to Chrome, i.e. to every environment CI has. sw.js is a classic
   // script with no imports, so it runs under `vm` with a stub `self`.
   { name: "sw-routing", file: "spike-sw-routing.mjs", net: false, timeout: 60000 },
+  // Static for the same reason: Document-Isolation-Policy is Chromium-only and nothing
+  // in CI runs a browser. The SW's mirroring runs under `vm` like sw-routing.
+  { name: "sw-isolation-policy", file: "spike-sw-isolation-policy.mjs", net: false, timeout: 60000 },
   // Same reason this one is static: nothing in CI runs a browser, and no CI runner is a
   // Mac. The word-wrap chord's whole failure mode is macOS-only, so the matcher is
   // plain JS and this drives it with the event shapes macOS produces.

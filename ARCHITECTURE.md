@@ -754,6 +754,13 @@ path must never do is reject — a rejected `respondWith()` is a dead request ca
 no diagnostic, which is precisely how the kernel worker died silently.
 `scripts/spike-sw-routing.mjs` drives the real `sw.js` under `vm` and gates it.
 
+**Previews mirror the host's `Document-Isolation-Policy`.** DIP (Chromium only) gives a
+document its own agent cluster, so a same-origin preview whose DIP differs from its host's
+is cross-origin to it, in either direction, and the SW never adds a fixed value. It sends
+a `HEAD` to the page that announced `vv-kernel-host`, keeps that page's DIP (persisted in
+`vv-config`), and `handlePreview` sets it on preview navigations. No DIP on the host means
+none on the preview. `scripts/spike-sw-isolation-policy.mjs` gates it.
+
 **Preview iframes start at about:blank, then navigate.** On a fresh page load the
 studio document is fetched before the SW takes control, so a brand-new iframe whose
 *first* navigation is a direct `/preview/<port>/` URL isn't intercepted — the

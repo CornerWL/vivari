@@ -26,6 +26,21 @@ page — the same page you get from `X-Frame-Options`, which sends you looking f
 CSP that isn't there. So if you scope the headers by path, make sure every
 document you iframe is inside the scoped paths.
 
+**Embedding on a host that sends no headers (Chromium only).** COOP and COEP have to
+come from the top-level page, so Vivari in an iframe normally needs the host site to
+send them. In Chromium the frame can isolate itself instead, by sending this on its
+own documents:
+
+```
+Document-Isolation-Policy: isolate-and-require-corp
+```
+
+Other browsers ignore it and still need the host's COOP and COEP. Previews need no
+extra setup: the preview Service Worker copies your page's `Document-Isolation-Policy`
+onto every preview, so the page can still read and reload its preview iframe. Send
+the same value on every document on that origin, since the Service Worker keeps one
+value per origin.
+
 Check at runtime:
 
 ```ts
