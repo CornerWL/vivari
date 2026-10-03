@@ -755,11 +755,17 @@ no diagnostic, which is precisely how the kernel worker died silently.
 `scripts/spike-sw-routing.mjs` drives the real `sw.js` under `vm` and gates it.
 
 **Previews mirror the host's `Document-Isolation-Policy`.** DIP (Chromium only) gives a
-document its own agent cluster, so a same-origin preview whose DIP differs from its host's
-is cross-origin to it, in either direction, and the SW never adds a fixed value. It sends
-a `HEAD` to the page that announced `vv-kernel-host`, keeps that page's DIP (persisted in
-`vv-config`), and `handlePreview` sets it on preview navigations. No DIP on the host means
-none on the preview. `scripts/spike-sw-isolation-policy.mjs` gates it.
+document its own agent cluster, so a same-origin preview isolated by DIP under a host that
+is not, or the reverse, is cross-origin to it, and the SW never adds a fixed value. The page
+that announces `vv-kernel-host` may declare its DIP in that message
+(`BootOptions.documentIsolationPolicy`, `"none"` for no header); otherwise the SW sends a
+`HEAD` to the page's URL with the query and fragment dropped (a server may run its GET
+handler for it, and the URL can carry a one-time token) and without following redirects
+(an expired session's login page is not the host). It keeps the value (persisted in
+`vv-config`, one per origin), and `handlePreview` sets it on preview navigations served to
+a same-origin host. No DIP on the host means none on the preview, and a preview served to
+a cross-origin IDE (modes B/C) gets none: it is cross-origin to the IDE anyway and keeps
+its `COEP: credentialless`. `scripts/spike-sw-isolation-policy.mjs` gates it.
 
 **Preview iframes start at about:blank, then navigate.** On a fresh page load the
 studio document is fetched before the SW takes control, so a brand-new iframe whose

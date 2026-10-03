@@ -20,7 +20,7 @@
 // is served same-origin (which COEP requires).
 
 import { VivariError } from "./errors.js";
-import type { KernelMessage, Unsubscribe } from "./types.js";
+import type { DocumentIsolationPolicy, KernelMessage, Unsubscribe } from "./types.js";
 
 type Handler = (m: KernelMessage) => void;
 
@@ -116,6 +116,10 @@ export class KernelBridge {
   // them on the IDE origin. Ignored in mode A (pop-outs are always same-origin)
   // and mode C (pop-outs always open on the per-port origin).
   private readonly previewPopout: "same-origin" | "isolated";
+  // The page's Document-Isolation-Policy as the embedder declared it (see
+  // BootOptions.documentIsolationPolicy); sent with every `vv-kernel-host` so the SW
+  // need not probe the page for it.
+  private readonly documentIsolationPolicy?: DocumentIsolationPolicy;
   // Preview SW registration URL (remembered so mode C can set up per-port bridges
   // lazily as servers start listening).
   private swUrl = "/sw.js";
@@ -134,6 +138,7 @@ export class KernelBridge {
       previewWildcardDomain?: string;
       previewWildcardTag?: string;
       previewPopout?: "same-origin" | "isolated";
+      documentIsolationPolicy?: DocumentIsolationPolicy;
     } = {},
   ) {
     // Only treat a *different* origin as mode B; an accidental same-origin value
@@ -153,6 +158,7 @@ export class KernelBridge {
       this.previewMode = "same-origin";
     }
     this.previewPopout = options.previewPopout === "isolated" ? "isolated" : "same-origin";
+    this.documentIsolationPolicy = options.documentIsolationPolicy;
     this.worker = new Worker(
       new URL("./workers/kernel-worker.ts", import.meta.url),
       { type: "module", name: options.workerName ?? "Vivari Kernel" },
@@ -601,7 +607,11 @@ export class KernelBridge {
    */
   announceKernelHost(): void {
     if (typeof navigator === "undefined" || !("serviceWorker" in navigator)) return;
-    navigator.serviceWorker.controller?.postMessage({ type: "vv-kernel-host" });
+    navigator.serviceWorker.controller?.postMessage(
+      this.documentIsolationPolicy === undefined
+        ? { type: "vv-kernel-host" }
+        : { type: "vv-kernel-host", documentIsolationPolicy: this.documentIsolationPolicy },
+    );
   }
 
   /**

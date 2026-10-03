@@ -42,6 +42,7 @@ export type {
   ConnectionListener,
   DirectoryNode,
   DirEnt,
+  DocumentIsolationPolicy,
   Encoding,
   ErrorListener,
   ExportedFile,

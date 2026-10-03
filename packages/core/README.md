@@ -86,7 +86,8 @@ Service Worker.
 | `signal`           | `AbortSignal`       | —                 | cancel the boot; rejects with `ERR_ABORTED`                        |
 
 Plus the preview-isolation options `previewOrigin`, `previewWildcardDomain`,
-`previewWildcardTag` and `previewPopout` — see the JSDoc on `BootOptions`.
+`previewWildcardTag`, `previewPopout` and `documentIsolationPolicy` — see the JSDoc on
+`BootOptions`.
 
 `boot()` always settles. It rejects with a `VivariError` if the page isn't
 isolated, the kernel worker fails to load, the kernel reports a boot failure, the

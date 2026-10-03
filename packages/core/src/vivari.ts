@@ -123,6 +123,7 @@ export class Vivari {
       previewWildcardDomain: options.previewWildcardDomain,
       previewWildcardTag: options.previewWildcardTag,
       previewPopout: options.previewPopout,
+      documentIsolationPolicy: options.documentIsolationPolicy,
     });
     const vivari = new Vivari(bridge);
 

@@ -11472,3 +11472,37 @@ Hardened before merge, each with a gate in `spike-net-relay`:
   the kernel while the guest is paused (≈2 MB of 48 MB, vs all 48 MB without it) rather
   than what the sender flushed, because host TCP autotuning can absorb tens of MB.
 - **The relay token stays out of logs**: every log line names the relay by origin only.
+
+## Previews mirror the host's `Document-Isolation-Policy` (this change)
+
+In Chromium a page can isolate itself with `Document-Isolation-Policy` (DIP) instead of the
+top-level page's COOP and COEP, so Vivari can boot in an iframe on a host that sends no
+headers. Its previews could not be read back, though: DIP gives the page its own agent
+cluster, the SW served previews without the header, and the page's
+`iframe.contentWindow.location` threw `SecurityError`, which broke an IDE's address bar and
+reload. Putting a fixed DIP on every preview breaks ordinary COOP + COEP pages the same way
+in reverse, so the SW mirrors the page instead (contributed as GitHub PR #10): it learns the
+host's value and `handlePreview` sets it on preview navigations only. A page without DIP
+gets exactly the responses it got before.
+
+The PR learned the value by sending a `HEAD` to the announcing page's URL. Review tightened
+how:
+- **The host can declare it.** `BootOptions.documentIsolationPolicy` (`"none"` for no
+  header) travels in `vv-kernel-host`, and the SW then sends no request at all. The embedder
+  already knows its own headers; the probe stays as the fallback.
+- **The probe drops the query and fragment.** Frameworks commonly run the GET handler for a
+  HEAD, and the page's URL can carry a one-time token (an OAuth `?code=`) that a replay
+  would spend.
+- **The probe does not follow redirects.** Followed, an expired session's redirect to a
+  login page read as "no policy" and overwrote the right one for the whole origin.
+- **Cross-origin previews get none.** A preview served to a cross-origin IDE (modes B/C) is
+  cross-origin to it regardless, and `isolate-and-require-corp` would be stricter than the
+  `COEP: credentialless` it is served with.
+
+Still true: the SW keeps one value per origin, because a preview navigation does not say
+which page framed it, so every page on an origin that boots Vivari must agree; and DIP does
+nothing in Firefox or WebKit. Gate: `scripts/spike-sw-isolation-policy.mjs` (offline,
+Wasm-free) drives the real `sw.js` under `vm`, including the redirect, token, declared-value,
+cross-origin and overlapping-announcement cases, each of which fails on the PR's original
+probe. A declared value is trusted as given, so it has to match the header the page is
+really served with.

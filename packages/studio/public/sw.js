@@ -130,7 +130,7 @@ const ISOLATION_POLICY_KEY = "https://vv.config/isolation-policy";
 const ISOLATION_POLICIES = ["isolate-and-require-corp", "isolate-and-credentialless"];
 const ISOLATION_PROBE_TIMEOUT_MS = 3000;
 let isolationPolicy = null; // Promise<string | null>; a probe in flight replaces it
-let isolationPolicyLearnedFrom = null; // the host URL probed by this SW instance
+let isolationPolicyLearnedFrom = null; // the probed URL, or the declared value, last taken
 
 async function readConfig(key, fallback) {
   try {
@@ -162,24 +162,47 @@ function parseIsolationPolicy(header) {
   return ISOLATION_POLICIES.includes(token) ? token : null;
 }
 
-// Read off the host document's own response. A failed probe keeps the last known policy
-// and is retried on the host's next announcement.
-function learnIsolationPolicy(hostUrl, waitUntil) {
-  if (!hostUrl || hostUrl === isolationPolicyLearnedFrom) return;
-  isolationPolicyLearnedFrom = hostUrl;
+// The host's own declaration (BootOptions.documentIsolationPolicy, `"none"` for no
+// header) is taken as given: it costs no request. Otherwise it is read off the host
+// document's response to a HEAD. The probe drops the query and fragment, because a
+// server may run its GET handler for a HEAD and the page's URL can carry a one-time
+// token (an OAuth `?code=`). It does not follow redirects: a login page answering for
+// an expired session is not the host document. A failed probe keeps the last known
+// policy and is retried on the host's next announcement.
+function learnIsolationPolicy(hostUrl, declared, waitUntil) {
+  const stated = typeof declared === "string" ? declared.trim().toLowerCase() : "";
+  const isDeclared = stated === "none" || parseIsolationPolicy(stated) !== null;
+  let probeUrl = null;
+  if (!isDeclared) {
+    try {
+      const u = new URL(hostUrl);
+      u.search = "";
+      u.hash = "";
+      probeUrl = u.href;
+    } catch (_) {
+      return;
+    }
+  }
+  const source = isDeclared ? `declared:${stated}` : probeUrl;
+  if (source === isolationPolicyLearnedFrom) return;
+  isolationPolicyLearnedFrom = source;
   const known = loadIsolationPolicy();
   isolationPolicy = (async () => {
-    const res = await fetch(hostUrl, {
-      method: "HEAD",
-      cache: "no-store",
-      signal: AbortSignal.timeout(ISOLATION_PROBE_TIMEOUT_MS),
-    }).catch(() => null);
-    if (!res || !res.ok) {
-      if (isolationPolicyLearnedFrom === hostUrl) isolationPolicyLearnedFrom = null;
-      return known;
+    let policy = parseIsolationPolicy(stated);
+    if (!isDeclared) {
+      const res = await fetch(probeUrl, {
+        method: "HEAD",
+        cache: "no-store",
+        redirect: "manual",
+        signal: AbortSignal.timeout(ISOLATION_PROBE_TIMEOUT_MS),
+      }).catch(() => null);
+      if (!res || !res.ok) {
+        if (isolationPolicyLearnedFrom === source) isolationPolicyLearnedFrom = null;
+        return known;
+      }
+      policy = parseIsolationPolicy(res.headers.get("Document-Isolation-Policy"));
     }
-    const policy = parseIsolationPolicy(res.headers.get("Document-Isolation-Policy"));
-    await known; // an earlier probe persists first, so the last announcement wins
+    await known; // an earlier announcement persists first, so the last one wins
     await writeConfig(ISOLATION_POLICY_KEY, policy);
     return policy;
   })();
@@ -243,7 +266,9 @@ self.addEventListener("message", (event) => {
   // handlePreview routes preview HTTP to it even when it's a nested iframe.
   if (d && d.type === "vv-kernel-host") {
     if (event.source && event.source.id) kernelHostIds.add(event.source.id);
-    learnIsolationPolicy(event.source && event.source.url, (p) => event.waitUntil(p));
+    learnIsolationPolicy(event.source && event.source.url, d.documentIsolationPolicy, (p) =>
+      event.waitUntil(p),
+    );
     return;
   }
   if (d && d.type === "vv-keep-prefix-ports" && Array.isArray(d.ports)) {
@@ -1350,17 +1375,20 @@ function previewConnectingHtml(port) {
   );
 }
 
-// Every preview response leaves through here. DIP only means anything on a document.
+// Every preview response leaves through here. DIP only means anything on a document, and
+// only for a host on this origin: a preview served to a cross-origin IDE (modes B and C)
+// is cross-origin to it regardless, and keeps the COEP: credentialless it is served with.
 async function handlePreview(event, port, path, keepPrefix) {
-  const res = await servePreview(event, port, path, keepPrefix);
-  if (event.request.mode === "navigate") {
+  const served = {};
+  const res = await servePreview(event, port, path, keepPrefix, served);
+  if (event.request.mode === "navigate" && !served.cross) {
     const policy = await loadIsolationPolicy();
     if (policy) res.headers.set("Document-Isolation-Policy", policy);
   }
   return res;
 }
 
-async function servePreview(event, port, path, keepPrefix) {
+async function servePreview(event, port, path, keepPrefix, served = {}) {
   if (!Number.isInteger(port)) {
     return new Response("Bad preview URL\n", { status: 400 });
   }
@@ -1369,6 +1397,7 @@ async function servePreview(event, port, path, keepPrefix) {
   // the persistent port to the (cross-origin) IDE, reviving it if the SW was
   // evicted. `cross` tells us which CORP/COEP headers the response needs.
   const sink = await resolveKernelSink();
+  if (sink) served.cross = !!sink.cross;
   if (!sink) {
     // A top-level preview tab (mode B "Open in new tab") whose kernel we can't
     // reach yet — show a friendly, auto-retrying page instead of a bare 503 or a

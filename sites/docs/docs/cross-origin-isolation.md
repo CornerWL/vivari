@@ -35,11 +35,27 @@ own documents:
 Document-Isolation-Policy: isolate-and-require-corp
 ```
 
-Other browsers ignore it and still need the host's COOP and COEP. Previews need no
-extra setup: the preview Service Worker copies your page's `Document-Isolation-Policy`
-onto every preview, so the page can still read and reload its preview iframe. Send
-the same value on every document on that origin, since the Service Worker keeps one
-value per origin.
+Other browsers ignore it and still need the host's COOP and COEP. The preview Service
+Worker copies your page's `Document-Isolation-Policy` onto the preview documents it
+serves to that page (previews on a separate preview origin get none, being
+cross-origin anyway), so the page can still read and reload its preview iframe. Tell
+it the value when you boot:
+
+```ts
+await Vivari.boot({ documentIsolationPolicy: "isolate-and-require-corp" });
+```
+
+The declared value is used as given, so it has to be the header the page is really
+served with: a value the page doesn't send breaks the preview the same way a missing
+one does. The option needs the `sw.js` from the same `@vivari/core` version; an older
+copy ignores it and falls back to asking your server.
+
+If you don't declare it, the Service Worker asks your server: it sends a `HEAD` to the
+page's URL (without its query string) and reads the header off the response. That needs
+your server to answer `HEAD` with the same header as `GET` and without a redirect, and
+it costs one extra request each time the Service Worker starts. The Service Worker
+keeps one value per origin, so every page on that origin that boots Vivari should
+declare (or be served with) the same value.
 
 Check at runtime:
 

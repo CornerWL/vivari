@@ -43,6 +43,7 @@ Service Worker.
 | `previewWildcardDomain` | `string` | — | serve each in-VM port from its own origin, `<token>--<port>.<domain>` (mode C) |
 | `previewWildcardTag` | `string` | — | hostname suffix for mode C when the domain also serves other apps |
 | `previewPopout` | `"same-origin" \| "isolated"` | `"same-origin"` | where "Open in new tab" lands, in mode B |
+| `documentIsolationPolicy` | `"isolate-and-require-corp" \| "isolate-and-credentialless" \| "none"` | — (probed) | the page's own `Document-Isolation-Policy`, mirrored onto same-origin previews (Chromium); see [cross-origin isolation](./cross-origin-isolation.md) |
 
 `boot()` always settles. It **rejects** with a [`VivariError`](#errors) if the page
 isn't cross-origin isolated (`ERR_NOT_ISOLATED`), the kernel worker fails to load

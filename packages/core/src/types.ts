@@ -14,6 +14,9 @@ export type Unsubscribe = () => void;
 /** Text encodings the VFS can decode to a string. Both spellings of UTF-8 work. */
 export type Encoding = "utf-8" | "utf8";
 
+/** A page's `Document-Isolation-Policy`, or `"none"` when it sends no such header. */
+export type DocumentIsolationPolicy = "isolate-and-require-corp" | "isolate-and-credentialless" | "none";
+
 /** Options for {@link Vivari.boot}. */
 export interface BootOptions {
   /**
@@ -48,6 +51,17 @@ export interface BootOptions {
    * entirely — do this if you don't need in-browser server previews.
    */
   serviceWorkerUrl?: string | false;
+  /**
+   * The `Document-Isolation-Policy` your page is served with (Chromium only), so the
+   * preview Service Worker can put the same value on preview documents. A same-origin
+   * preview whose policy differs from the page's lands in another agent cluster, and
+   * reading its `contentWindow.location` then throws. Pass `"none"` if the page sends
+   * no such header. Left unset, the Service Worker learns the value by sending a
+   * `HEAD` to the page's URL (query and fragment dropped), which needs that `HEAD` to
+   * answer with the same header and without a redirect. The Service Worker keeps one
+   * value per origin, so every page on the origin that boots Vivari should agree.
+   */
+  documentIsolationPolicy?: DocumentIsolationPolicy;
   /**
    * Serve previews from a **separate origin** for isolation (mode B). When set to
    * another origin (e.g. `"https://vivari-preview.pages.dev"`), the preview
