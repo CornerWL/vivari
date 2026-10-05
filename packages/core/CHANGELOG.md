@@ -3,6 +3,12 @@
 From 1.1.0 on, entries are generated from [changesets](https://github.com/changesets/changesets).
 `@vivari/core` and `@vivari/react` are released together under the same version.
 
+## 1.1.1
+
+### Patch Changes
+
+- [`93a6a79`](https://github.com/maitrungduc1410/vivari/commit/93a6a79b35d4e8800e93f67af6827761c07b494c) Thanks [@maitrungduc1410](https://github.com/maitrungduc1410)! - A `MessagePort` follows Node's rules in the browser: `onmessage` and `addEventListener('message')` now start the port and keep the process alive like `on('message')`, a port stops holding when its other end closes, and a worker's `parentPort` is a real `MessagePort` (GitHub issue [#13](https://github.com/maitrungduc1410/vivari/issues/13)).
+
 ## 1.1.0
 
 ### Minor Changes
