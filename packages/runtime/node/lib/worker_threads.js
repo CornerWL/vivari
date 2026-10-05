@@ -19,7 +19,8 @@
 // Scope: Worker(entry, {workerData, argv, env, cwd, eval, transferList}),
 // postMessage/on('message'|'online'|'exit'|'error')/terminate/ref/unref,
 // parentPort, workerData, threadId, isMainThread, MessageChannel/MessagePort
-// (platform), and receiveMessageOnPort (synchronous manual-polling drain).
+// (platform ports with Node's semantics — see ../../message-port.js), and
+// receiveMessageOnPort (synchronous manual-polling drain).
 // MessagePorts embedded in `workerData` (the `createSyncFn`/synckit pattern:
 // `new Worker(f, { workerData: { port }, transferList: [port] })`) ARE now handed
 // across to the child — see collectTransferables + host.spawn. Deferred:
@@ -27,22 +28,19 @@
 // PISCINA_DISABLE_ATOMICS=1 — a browser MessagePort can't be drained
 // synchronously across a worker boundary).
 
+import { installMessagePort } from "../../message-port.js";
+
 export default function (exports, require, module, process) {
   const g = globalThis;
   const EventEmitter = require("events");
   const host = process.__wtHost || null;
 
-  // Node's MessagePort is an EventEmitter — `port.on('message', (value) => ...)`
-  // with the posted value delivered directly. The platform MessagePort is an
-  // EventTarget — `addEventListener('message', (e) => e.data)`. Worker pools
-  // (Piscina, which backs Angular's compiler and vitest) call `port.on(...)`
-  // straight on ports returned by `new MessageChannel()`, so bridge the
-  // EventEmitter surface onto the platform prototype. The ports stay real (and
-  // therefore transferable in a transferList); we only add methods.
-  // Both assigned by patchMessagePortPrototype, which owns the port bookkeeping.
-  let duringInternalSetup = false;
-  let internalPortSetup = (fn) => fn();
-  patchMessagePortPrototype(g.MessagePort);
+  // createRuntime installed this at boot; the call only hands back the handle.
+  const ports = installMessagePort(g, host);
+  const internalPortSetup = ports ? ports.internalPortSetup : (fn) => fn();
+  const NativeMessageChannel = ports ? ports.NativeMessageChannel : g.MessageChannel;
+  const isCloseSignal = ports ? ports.isCloseSignal : () => false;
+  const markEventPorts = ports ? ports.markEventPorts : () => {};
 
   // ---- a single event queue drained inside a loop turn (like #15) -----------
   // Emitting 'message'/'exit' directly from a raw port's onmessage would run user
@@ -53,9 +51,17 @@ export default function (exports, require, module, process) {
     eventQueue.push({ emitter, type, args, after });
     if (host) host.wake();
   };
+  const enqueueRun = (run) => {
+    eventQueue.push({ run });
+    if (host) host.wake();
+  };
   const drain = () => {
     while (eventQueue.length) {
-      const { emitter, type, args, after } = eventQueue.shift();
+      const { emitter, type, args, after, run } = eventQueue.shift();
+      if (run) {
+        run();
+        continue;
+      }
       emitter.emit(type, ...args);
       // Post-emit hook: release liveness only *after* the event is delivered, so
       // the loop doesn't decide it's idle (and skip this very drain) between the
@@ -68,29 +74,18 @@ export default function (exports, require, module, process) {
   const threadId = host ? host.threadId : 0;
   const workerData = host ? (host.workerData ?? null) : null;
 
-  // ---- parentPort (child side): wrap the raw transferred MessagePort ---------
-  // Node's parentPort is an EventEmitter-flavoured MessagePort. We expose on(
-  // 'message')/postMessage/close/ref/unref and keep the worker alive while it has
-  // a 'message' listener (Node semantics: a listening parentPort refs the loop).
-  function wrapParentPort(raw) {
-    const ee = new EventEmitter();
-    let refs = 0;
-    const retain = () => { if (refs++ === 0 && host) host.retain(); };
-    const release = () => { if (refs > 0 && --refs === 0 && host) host.release(); };
-    internalPortSetup(() => {
-      raw.onmessage = (e) => enqueue(ee, "message", [e.data]);
-      try { raw.start && raw.start(); } catch { /* onmessage auto-starts */ }
-    });
-    ee.postMessage = (value, transferList) => raw.postMessage(value, transferList || []);
-    ee.start = () => {};
-    ee.close = () => { try { raw.close(); } catch { /* ignore */ } if (refs > 0) { refs = 0; host && host.release(); } };
-    ee.ref = () => retain();
-    ee.unref = () => { if (refs > 0) { refs = 0; host && host.release(); } };
-    ee.on("newListener", (name) => { if (name === "message") retain(); });
-    ee.on("removeListener", (name) => { if (name === "message") release(); });
-    return ee;
+  // ---- parentPort (child side): the transferred MessagePort itself ----------
+  // A real MessagePort, as on Node — so `onmessage`, `addEventListener` and
+  // `instanceof MessagePort` work, and listening holds the thread exactly like any
+  // other guest port. What it keeps from the old wrapper is delivery inside a
+  // loop turn: its listeners run from the drain, not from the platform's event.
+  function adoptParentPort(port) {
+    if (!ports) return port;
+    ports.markGuest(port);
+    ports.setDelivery(port, enqueueRun);
+    return port;
   }
-  const parentPort = host && host.parentPort ? wrapParentPort(host.parentPort) : null;
+  const parentPort = host && host.parentPort ? adoptParentPort(host.parentPort) : null;
 
   // ---- Worker (parent side) -------------------------------------------------
   const workers = new Map(); // reqId -> Worker
@@ -202,13 +197,22 @@ export default function (exports, require, module, process) {
       this._refed = true;
       this._msgRefs = 0;
       this._portHeld = false;
+      this._portClosed = false;
       this.on("newListener", (name) => { if (name === "message") this._msgRetain(); });
       this.on("removeListener", (name) => { if (name === "message") this._msgRelease(); });
 
-      const { port1, port2 } = new g.MessageChannel();
+      // The runtime's own channel: the Worker accounts for its port itself
+      // (_msgRetain/_portRef below), so it must not also hold as a guest port.
+      const { port1, port2 } = new NativeMessageChannel();
       this._port = port1;
       internalPortSetup(() => {
-        port1.onmessage = (e) => enqueue(this, "message", [e.data]);
+        port1.onmessage = (e) => {
+          // The child closed parentPort. Queued behind the messages it posted
+          // first, so those are still delivered.
+          if (isCloseSignal(e.data)) return enqueueRun(() => this._closePort());
+          markEventPorts(e);
+          enqueue(this, "message", [e.data]);
+        };
       });
       try { port1.start && port1.start(); } catch { /* auto-starts */ }
 
@@ -278,12 +282,19 @@ export default function (exports, require, module, process) {
 
     // The port half. `_msgRefs` counts 'message' listeners; `_portHeld` is whether
     // the port is currently holding the loop, which unref() can drop while
-    // listeners remain and a later listener can take back.
+    // listeners remain and a later listener can take back — unless the port is
+    // closed. The child closing parentPort closes it, as on Node: an unref'd
+    // Worker then stops holding the parent even if the thread keeps running.
     _portRef() {
-      if (!this._portHeld && !this._exited && host) { this._portHeld = true; host.retain(); }
+      if (!this._portHeld && !this._exited && !this._portClosed && host) { this._portHeld = true; host.retain(); }
     }
     _portRelease() {
       if (this._portHeld && host) { this._portHeld = false; host.release(); }
+    }
+    _closePort() {
+      this._portClosed = true;
+      this._portRelease();
+      try { this._port.close(); } catch { /* already closed */ }
     }
     _msgRetain() {
       this._msgRefs++;
@@ -345,7 +356,7 @@ export default function (exports, require, module, process) {
   exports.SHARE_ENV = Symbol.for("nodejs.worker_threads.SHARE_ENV");
   exports.Worker = Worker;
 
-  exports.MessageChannel = g.MessageChannel;
+  exports.MessageChannel = ports ? ports.MessageChannel : g.MessageChannel;
   exports.MessagePort = g.MessagePort;
   exports.BroadcastChannel = g.BroadcastChannel;
 
@@ -367,15 +378,22 @@ export default function (exports, require, module, process) {
   // and shifted out here. Lazy (not eager on every port) so ports used purely with
   // the event API never grow an undrained buffer — that would be a memory leak on a
   // long-running dev server. Like Node, it returns only messages already delivered
-  // and never blocks waiting for new ones.
+  // and never blocks waiting for new ones. Nor does polling hold the loop: Node's
+  // receiveMessageOnPort adds no listener, so the inbox is runtime plumbing.
   const RX_INBOX = Symbol("vvPortRxInbox");
   function armInbox(port) {
     let inbox = port[RX_INBOX];
     if (inbox) return inbox;
     inbox = port[RX_INBOX] = [];
     try {
-      port.addEventListener("message", (e) => inbox.push(e.data));
-      port.start && port.start();
+      internalPortSetup(() => {
+        port.addEventListener("message", (e) => {
+          if (isCloseSignal(e.data)) return;
+          markEventPorts(e);
+          inbox.push(e.data);
+        });
+        port.start && port.start();
+      });
     } catch {
       /* not a real MessagePort — leave the (empty) inbox */
     }
@@ -391,174 +409,4 @@ export default function (exports, require, module, process) {
   exports.moveMessagePortToContext = () => {
     throw new Error("worker_threads.moveMessagePortToContext is not supported");
   };
-
-  // Add Node's EventEmitter-style methods to the platform MessagePort prototype,
-  // mapping onto addEventListener/removeEventListener. Idempotent (guarded by a
-  // marker) and additive, so platform `onmessage`/`addEventListener` users are
-  // unaffected. A first `on('message')` call auto-starts the port (Node
-  // semantics). Ports remain real MessagePort instances, so `instanceof` and
-  // transfer still work.
-  function patchMessagePortPrototype(MessagePort) {
-    const proto = MessagePort && MessagePort.prototype;
-    if (!proto || proto.__ocNodeEvents) return;
-    proto.__ocNodeEvents = true;
-    const LISTENERS = Symbol("vvPortListeners");
-    const bag = (port) => port[LISTENERS] || (port[LISTENERS] = new Map());
-    const dataEvents = new Set(["message", "messageerror"]);
-
-    // A listening port keeps the process alive, which is the whole reason a
-    // channel handed to someone else is usable: you listen, they reply later,
-    // and Node is still running when they do. The platform MessagePort has no
-    // such notion — the host worker's loop is not ours — so the hold is ours to
-    // model, on the same counter every other handle uses.
-    //
-    // Without it, `const { port1, port2 } = new MessageChannel()` plus
-    // `port1.on('message', …)` was a promise waiting on an event loop that had
-    // already decided it had nothing to do. That is how `vitest run` exited 0
-    // having run nothing: rolldown's wasm binding (@napi-rs/wasm-runtime, via
-    // Vite 8) spawns its wasi worker, hands it a channel, and awaits the reply.
-    // The reply was on its way; the process was not there to receive it.
-    //
-    // ref()/unref() move the hold without touching the listener count, so the
-    // Node ordering holds: unref() then on('message') listens and waits,
-    // on('message') then unref() lets the process go.
-    const HELD = Symbol("vvPortHeld");
-    const MSG_REFS = Symbol("vvPortMsgRefs");
-    // Which ports are the GUEST's. A port becomes one by being created through
-    // the guest's MessageChannel or by the guest listening on it; the runtime's
-    // own plumbing ports never are, so their ref() stays purely the platform's.
-    // Assigning `port.onmessage` refs the port — Node's own EventTarget
-    // bookkeeping calls ref() from the newListener hook — and the runtime does
-    // that on its OWN ports: the Worker's half of the parent<->child channel, and
-    // the raw port behind parentPort. Those are plumbing, not the guest's loop, so
-    // the ref that comes back through here during our setup must not hold the
-    // guest open. Held it once and every worker spawn hung: the parent waited on a
-    // child whose own runtime port was keeping it alive for ever.
-    internalPortSetup = (fn) => {
-      const prev = duringInternalSetup;
-      duringInternalSetup = true;
-      try {
-        return fn();
-      } finally {
-        duringInternalSetup = prev;
-      }
-    };
-    const portRef = (port) => {
-      if (!port[HELD] && host) {
-        port[HELD] = true;
-        host.retain();
-      }
-    };
-    const portRelease = (port) => {
-      if (port[HELD] && host) {
-        port[HELD] = false;
-        host.release();
-      }
-    };
-    proto.addListener = proto.on = function on(type, listener) {
-      const wrapped = dataEvents.has(type) ? (e) => listener(e.data) : (e) => listener(e);
-      const b = bag(this);
-      let byType = b.get(type);
-      if (!byType) b.set(type, (byType = new Map()));
-      byType.set(listener, wrapped);
-      this.addEventListener(type, wrapped);
-      if (type === "message") {
-        try {
-          this.start();
-        } catch {
-          /* onmessage/addEventListener already auto-started it */
-        }
-        this[MSG_REFS] = (this[MSG_REFS] || 0) + 1;
-        portRef(this);
-      }
-      return this;
-    };
-    proto.once = function once(type, listener) {
-      const self = this;
-      const one = function (value) {
-        self.removeListener(type, one);
-        listener(value);
-      };
-      return this.on(type, one);
-    };
-    proto.removeListener = proto.off = function off(type, listener) {
-      const byType = bag(this).get(type);
-      const wrapped = byType && byType.get(listener);
-      if (wrapped) {
-        this.removeEventListener(type, wrapped);
-        byType.delete(listener);
-        if (type === "message" && this[MSG_REFS] > 0 && --this[MSG_REFS] === 0) portRelease(this);
-      }
-      return this;
-    };
-    proto.removeAllListeners = function removeAllListeners(type) {
-      const b = bag(this);
-      for (const t of type ? [type] : [...b.keys()]) {
-        const byType = b.get(t);
-        if (byType) for (const w of byType.values()) this.removeEventListener(t, w);
-        b.delete(t);
-        if (t === "message") {
-          this[MSG_REFS] = 0;
-          portRelease(this);
-        }
-      }
-      return this;
-    };
-    proto.emit = function emit(type, arg) {
-      try {
-        this.dispatchEvent(dataEvents.has(type) ? new MessageEvent(type, { data: arg }) : new Event(type));
-      } catch {
-        /* best effort */
-      }
-      return true;
-    };
-    proto.listeners = function listeners(type) {
-      const byType = bag(this).get(type);
-      return byType ? [...byType.keys()] : [];
-    };
-    proto.listenerCount = function listenerCount(type) {
-      const byType = bag(this).get(type);
-      return byType ? byType.size : 0;
-    };
-    // ref() takes the hold with no listener required, and that is not a detail:
-    // it is the whole mechanism @emnapi/runtime uses to keep Node alive while a
-    // native async request is outstanding — `new MessageChannel().port1`, ref()
-    // on the way in, unref() on the way out, nothing ever listening. rolldown's
-    // wasm binding is built on it, so a ref() that quietly required a listener
-    // was a process exiting in the middle of napi work it had been asked to wait
-    // for.
-    //
-    // These WRAP the platform's ref/unref/close rather than replacing them, and
-    // only add the guest hold for a port the guest owns (GUEST below). Headless,
-    // the platform MessagePort is the host's own Node MessagePort and the runtime
-    // shares its realm, so this prototype is also the one the process worker's fs
-    // and thread plumbing runs on — and Node's internal listener bookkeeping
-    // calls port.ref() itself. Replacing ref() outright pointed those internal
-    // calls at OUR counter, which held a guest loop open on a port the guest had
-    // never heard of: every worker spawn hung, one layer below anything a guest
-    // could see.
-    const rawRef = proto.ref;
-    const rawUnref = proto.unref;
-    const rawClose = proto.close;
-    proto.ref = function ref() {
-      if (!duringInternalSetup) portRef(this);
-      if (rawRef) rawRef.call(this);
-      return this;
-    };
-    proto.unref = function unref() {
-      portRelease(this);
-      if (rawUnref) rawUnref.call(this);
-      return this;
-    };
-    // A closed port can deliver nothing, so it must stop holding the loop —
-    // otherwise close() on the last channel would hang the process instead of
-    // ending it.
-    proto.close = function close(...args) {
-      this[MSG_REFS] = 0;
-      portRelease(this);
-      return rawClose ? rawClose.apply(this, args) : undefined;
-    };
-    if (!proto.setMaxListeners) proto.setMaxListeners = function setMaxListeners() { return this; };
-    if (!proto.getMaxListeners) proto.getMaxListeners = function getMaxListeners() { return 0; };
-  }
 }

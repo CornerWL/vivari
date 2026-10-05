@@ -104,12 +104,133 @@ w.on('message', (m) => console.log('got', m));`,
 const w = new Worker('./reply.js');
 w.on('message', (m) => console.log('got', m));
 w.unref();`,
+
+  // The web-style surface is the SAME listener list (GitHub issue #13): the first
+  // listener starts and refs the port whichever API added it, the last one going
+  // unrefs it. Headless the platform port is Node's own, so these pass here even
+  // without the fix — spike-port-browser.mjs runs them on browser-shaped ports.
+  "addEventListener": `const { MessageChannel } = require('worker_threads');
+const { port1, port2 } = new MessageChannel();
+port1.addEventListener('message', (e) => { console.log('got', e.data); port1.close(); });
+setTimeout(() => port2.postMessage('hi'), 300);`,
+
+  "removeEventListener-in-handler": `const { MessageChannel } = require('worker_threads');
+const { port1, port2 } = new MessageChannel();
+const h = (e) => { console.log('got', e.data); port1.removeEventListener('message', h); };
+port1.addEventListener('message', h);
+setTimeout(() => port2.postMessage('hi'), 300);`,
+
+  "onmessage-then-null": `const { MessageChannel } = require('worker_threads');
+const { port1, port2 } = new MessageChannel();
+port1.onmessage = (e) => { console.log('got', e.data); port1.onmessage = null; };
+setTimeout(() => port2.postMessage('hi'), 300);`,
+
+  "addEventListener-once": `const { MessageChannel } = require('worker_threads');
+const { port1, port2 } = new MessageChannel();
+port1.addEventListener('message', (e) => console.log('got', e.data), { once: true });
+setTimeout(() => port2.postMessage('hi'), 300);
+setTimeout(() => port2.postMessage('unheard'), 600);`,
+
+  // The global constructor is worker_threads' own on Node, so it has Node's
+  // semantics before anything is required.
+  "global-channel": `const { port1, port2 } = new MessageChannel();
+port1.on('message', (m) => { console.log('got', m); port1.close(); });
+setTimeout(() => port2.postMessage('hi'), 300);`,
+
+  // The other end closing ends the hold: Node delivers what was posted, then
+  // closes this end too. A listening port that ignored it would hang.
+  "peer-closes": `const { MessageChannel } = require('worker_threads');
+const { port1, port2 } = new MessageChannel();
+port1.addEventListener('message', (e) => console.log('got', e.data));
+setTimeout(() => { port2.postMessage('last'); port2.close(); }, 300);`,
+
+  // Polling does not listen, so it does not hold.
+  "receiveMessageOnPort": `const { MessageChannel, receiveMessageOnPort } = require('worker_threads');
+const { port1, port2 } = new MessageChannel();
+console.log(JSON.stringify(receiveMessageOnPort(port1)));
+port2.postMessage('polled');
+setTimeout(() => console.log(JSON.stringify(receiveMessageOnPort(port1))), 300);`,
+
+  // The issue's own repro: a workerData port with onmessage in the child, and
+  // addEventListener on the parent's end.
+  "issue-13": `const { Worker, MessageChannel } = require('worker_threads');
+const { port1, port2 } = new MessageChannel();
+const w = new Worker('./workerdata-onmessage.js', { workerData: { port: port2 }, transferList: [port2] });
+w.on('exit', (code) => console.log('worker exit', code));
+port1.addEventListener('message', (e) => { console.log('got', e.data); port1.close(); });
+setTimeout(() => port1.postMessage('hi'), 300);`,
+
+  "worker-peer-closes": `const { Worker, MessageChannel } = require('worker_threads');
+const { port1, port2 } = new MessageChannel();
+const w = new Worker('./workerdata-listen-forever.js', { workerData: { port: port2 }, transferList: [port2] });
+w.on('message', (m) => console.log(m));
+w.on('exit', (code) => console.log('worker exit', code));
+setTimeout(() => { port1.postMessage('bye'); port1.close(); }, 300);`,
+
+  // The child closing parentPort closes the Worker's port as well: an unref'd
+  // Worker stops holding the parent even though the child is still running, and
+  // a listener added afterwards does not take the hold back.
+  "worker-child-closes-port": `const { Worker } = require('worker_threads');
+const w = new Worker('./parentport-close-linger.js');
+w.unref();
+w.on('message', (m) => console.log('got', m));
+setTimeout(() => console.log('still held'), 2000).unref();`,
+
+  "worker-listen-after-close": `const { Worker } = require('worker_threads');
+const w = new Worker('./parentport-close-linger.js');
+w.unref();
+w.once('message', (m) => { console.log('got', m); setTimeout(() => w.on('message', () => {}), 200); });
+setTimeout(() => console.log('still held'), 2000).unref();`,
+
+  // parentPort is a real MessagePort: onmessage, addEventListener, instanceof.
+  "parentPort-onmessage": `const { Worker } = require('worker_threads');
+const w = new Worker('./parentport-onmessage.js');
+w.on('message', (m) => console.log(m));
+w.on('exit', (code) => console.log('worker exit', code));
+setTimeout(() => w.postMessage('hi'), 300);`,
+
+  "parentPort-addEventListener": `const { Worker } = require('worker_threads');
+const w = new Worker('./parentport-addeventlistener.js');
+w.on('message', (m) => console.log(m));
+w.on('exit', (code) => console.log('worker exit', code));
+setTimeout(() => w.postMessage('hi'), 300);`,
+
+  // …and a parentPort nobody listens to holds nothing, or every worker is immortal.
+  "parentPort-unused": `const { Worker } = require('worker_threads');
+const w = new Worker('./parentport-unused.js');
+w.on('exit', (code) => console.log('worker exit', code));`,
 };
 
 const REPLY = `const { parentPort } = require('worker_threads');
 setTimeout(() => parentPort.postMessage('hi'), 300);`;
 
-const files = { "reply.js": REPLY };
+const files = {
+  "reply.js": REPLY,
+  "workerdata-onmessage.js": `const { workerData } = require('worker_threads');
+workerData.port.onmessage = (e) => {
+  workerData.port.postMessage('re: ' + e.data);
+  workerData.port.close();
+};`,
+  "workerdata-listen-forever.js": `const { workerData, parentPort } = require('worker_threads');
+workerData.port.onmessage = (e) => parentPort.postMessage('child got ' + e.data);`,
+  "parentport-onmessage.js": `const { parentPort } = require('worker_threads');
+parentPort.onmessage = (e) => {
+  parentPort.postMessage('re: ' + e.data + ' instanceof=' + (parentPort instanceof MessagePort));
+  parentPort.close();
+};`,
+  "parentport-addeventlistener.js": `const { parentPort } = require('worker_threads');
+const h = (e) => {
+  parentPort.postMessage('re: ' + e.data);
+  parentPort.removeEventListener('message', h);
+};
+parentPort.addEventListener('message', h);`,
+  "parentport-close-linger.js": `const { parentPort } = require('worker_threads');
+parentPort.postMessage('hi');
+parentPort.close();
+setTimeout(() => {}, 6000);`,
+  "parentport-unused.js": `const { parentPort } = require('worker_threads');
+if (typeof parentPort.postMessage !== 'function') process.exit(3);`,
+};
 for (const [name, body] of Object.entries(CASES)) {
   files[name + ".js"] = body + "\nprocess.on('exit', (c) => console.log('EXIT ' + c));\n";
 }

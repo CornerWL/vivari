@@ -25,6 +25,7 @@ import {
 } from "./builtins/bun-ipc.js";
 import { createPythonRuntime } from "./builtins/python.js";
 import { captureHostRealm, sealGuestRealm, installBunRealm } from "./realm.js";
+import { installMessagePort } from "./message-port.js";
 
 // The host realm as it was before a single line of ours ran. Taken at module
 // load, which is the last moment the answer is knowable: every global the runtime
@@ -452,6 +453,13 @@ export function createRuntime({
       if (postRaw) postRaw({ type: "thread-terminate", reqId });
     },
   };
+
+  // Node's MessagePort semantics from the first line of the guest, not from its
+  // first require('worker_threads'): on Node the global MessageChannel IS that
+  // module's. Ports the guest was handed in workerData are the guest's from the
+  // start. Everything the runtime itself listens on is not — see message-port.js.
+  const messagePorts = installMessagePort(globalThis, process.__wtHost);
+  if (messagePorts && thread && thread.workerData) messagePorts.markGuestIn(thread.workerData);
 
   // Expose the host's real markAsUntransferable so buffer.js's createPool() can mark
   // the shared pool untransferable to the platform's postMessage. Must be set BEFORE
@@ -1938,6 +1946,12 @@ export function createRuntime({
     // readBinary is a synchronous XHR too.
     const xhr = HOST_REALM.held.get("XMLHttpRequest");
     if (xhr && globalThis.XMLHttpRequest === undefined) globalThis.XMLHttpRequest = xhr;
+    // Pyodide boots on the web-worker path (maskBootEnv) and builds its scheduler
+    // from the realm's MessageChannel: one channel, a permanent port1.onmessage,
+    // never closed (pyodide.asm.mjs ensureSharedChannel). A guest channel with a
+    // listener holds the loop, so that one would keep every python process alive
+    // for ever. The guest here is Python; it gets the platform's constructor.
+    if (messagePorts) globalThis.MessageChannel = messagePorts.NativeMessageChannel;
     return pythonRuntime.install(indexUrl);
   };
 

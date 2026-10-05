@@ -11659,3 +11659,53 @@ running the Wasm-VFS offline spikes:
   the guest now pauses 5 s. If CI still fails, the check's own line names it.
 
 Still open: nothing in the job can shorten npm's review of core.
+
+## MessagePort: one listener list, held in a browser too (issue #13) (this change)
+
+A worker talking to its parent over a `MessageChannel` worked on Node and headless, and
+exited 0 unheard in the browser. Two gaps, either enough alone: `onmessage` and
+`addEventListener('message')` held nothing (only `on('message')` and `ref()` did), and
+`addEventListener` never started the port, because a browser starts a port for `onmessage`
+only. Headless hid both: there the platform port is Node's, which starts and refs on any
+listener by itself.
+
+- `runtime/message-port.js` (new), out of `worker_threads.js`: Node's
+  `setupPortReferencing` on the platform port. `on`, `addEventListener` (with `once` and
+  `signal`) and `onmessage` are one counted list; the first listener starts and refs the
+  port, the last one going releases it. Installed at boot, so the global
+  `MessageChannel` has these rules before anything requires `worker_threads`.
+- **Only guest ports hold.** Made by the guest's `MessageChannel`, handed to the guest
+  (`workerData`, a message's `ports`, `parentPort`), or used through `on`/`once`. The
+  runtime's own ports — the loop's macrotask channel, the fs doorbell, fork IPC, the
+  Worker's port — come from `NativeMessageChannel` and never hold: a held runtime port
+  is the worker-spawn hang this file once had. The comment that described a GUEST
+  marker described one that did not exist; this is it.
+- **A closed peer releases.** Node closes this end when the other closes; a browser
+  says nothing, and a listening port would have turned an early exit into a hang.
+  `close()` on a guest port posts a close signal behind what it sent; the other end
+  closes on it, and no listener or `receiveMessageOnPort` inbox ever sees it.
+  The Worker's own port closes on it too: a child that closes `parentPort` and keeps
+  running no longer pins an unref'd Worker's parent until the thread exits, and a
+  `'message'` listener added after the close takes no hold (both measured on Node 22).
+- `parentPort` is the transferred `MessagePort` itself, so `onmessage`,
+  `addEventListener` and `instanceof MessagePort` work. Its listeners still run from the
+  loop's drain, as the old wrapper's did, and it no longer swallows messages that arrive
+  before anyone listens.
+- `receiveMessageOnPort` no longer holds the loop. Headless it did, through Node's own
+  `ref()` from `addEventListener`: a script that polled once hung.
+- A python process gets the platform's `MessageChannel` back: Pyodide's scheduler is
+  one channel with a permanent `onmessage` (`pyodide.asm.mjs` `ensureSharedChannel`),
+  which as a guest channel would hold every python process open.
+- Gates: `spike-port-liveness.mjs` gains 14 cases against real Node (web-style
+  listeners, once, peer close, the issue's repro, `parentPort` as a port, an unused
+  `parentPort`, a child closing `parentPort`); on the old runtime 8 of them fail
+  headless, 3 as hangs.
+  `spike-port-browser.mjs` (new, offline, no Wasm) builds the HTML spec's port and runs
+  the shipped modules on it: 53 assertions, and on the old code the issue's repro gives
+  the issue's transcript, `worker exit 0` and nothing else.
+
+### Not done
+- A port held only by `ref()`, with no listener, does not see its peer close: it is not
+  started, so the signal waits in its queue. Same as before; `unref()` or `close()`.
+- A port the guest reaches some other way than the ones listed is not the guest's and
+  keeps browser semantics — an early exit, not a hang.

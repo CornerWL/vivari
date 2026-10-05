@@ -26,14 +26,17 @@ import { formatUncaught } from "./error-stack.js";
 // globals with our own versions (this module is imported before that happens).
 const hostSetTimeout = globalThis.setTimeout.bind(globalThis);
 const hostClearTimeout = globalThis.clearTimeout.bind(globalThis);
+// The platform's, not the guest's (message-port.js): this channel listens for
+// the life of the process and must never hold the guest's loop.
+const HostMessageChannel = typeof MessageChannel !== "undefined" ? MessageChannel : undefined;
 const now = () =>
   typeof globalThis.performance?.now === "function" ? globalThis.performance.now() : Date.now();
 
 // A 0-delay macrotask used to flush the microtask queue. MessageChannel isn't
 // clamped like nested setTimeout(0), so a busy loop stays responsive.
 const makeMacrotask = () => {
-  if (typeof MessageChannel !== "undefined") {
-    const mc = new MessageChannel();
+  if (HostMessageChannel) {
+    const mc = new HostMessageChannel();
     let queue = [];
     mc.port1.onmessage = () => {
       const batch = queue;

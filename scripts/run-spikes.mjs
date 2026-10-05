@@ -306,6 +306,9 @@ const SPIKES = [
   // A ref'd MessagePort holds the loop, with or without a listener. This is what
   // `vitest run` was exiting 0 in the middle of; every case runs against the host.
   { name: "port-liveness", file: "spike-port-liveness.mjs", net: false, needsWasm: true, timeout: 180000 },
+  // The same rules on a browser-shaped port, where headless cannot look: only
+  // onmessage starts a port there, nothing refs, and a closed peer says nothing.
+  { name: "port-browser", file: "spike-port-browser.mjs", net: false, timeout: 60000 },
   // Every constant table against the host, values included — a missing constant is
   // `undefined`, which is a silently wrong number rather than an error.
   { name: "constants", file: "spike-constants.mjs", net: false, needsWasm: true, timeout: 120000 },

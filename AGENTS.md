@@ -75,6 +75,9 @@ packages/
     vendor/acorn.mjs  vendored acorn parser used ONLY by instrument.js; ships in a
                    lazy import() chunk so it costs nothing when debug is off.
     loop.js        the per-process event loop (nextTick→micro→timers→immediate).
+    message-port.js  Node's MessagePort semantics on the platform port: one listener
+                   list across on/addEventListener/onmessage, ref/unref, peer close;
+                   only guest ports hold the loop. Installed at boot.
     boot.js        process bootstrap shared by browser + Node worker entries.
     fs-client.js   env-agnostic Atomics syscall client (the caller side).
     websocket.js   in-VM WebSocket client (used by the HMR tunnel).
@@ -4246,15 +4249,34 @@ against the host:
 - **Wrap the platform's `ref`/`unref`/`close`, never replace them.** Headless, the
   platform `MessagePort` is the host's own and the runtime shares its realm, so that
   prototype also carries the runtime's own plumbing.
-- **Assigning `port.onmessage` refs the port** (Node's EventTarget bookkeeping calls
-  `ref()` from its newListener hook), and the runtime does that on its own ports —
-  the Worker's half of the parent↔child channel, and the raw port behind
-  `parentPort`. Those two assignments go through `internalPortSetup(…)`, which
-  suppresses the guest hold for the duration. Without it every worker spawn hung: the
-  parent waited on a child that its own runtime port was keeping alive for ever.
+- **`on('message')`, `addEventListener('message')` and `onmessage` are ONE listener
+  list** (GitHub issue #13). The first listener starts and refs the port whichever API
+  added it; the last one going releases it. A browser port has none of this — only
+  `onmessage` starts it and nothing refs — so `packages/runtime/message-port.js` models
+  all of it, installed at boot (the global `MessageChannel` is worker_threads' own on
+  Node), not on the first `require('worker_threads')`.
+- **Only GUEST ports hold.** A port is the guest's if the guest's `MessageChannel`
+  made it, the guest was handed it (`workerData`, a message's `ports`, `parentPort`),
+  or the guest called `on`/`once` on it. Everything the runtime listens on — the loop's
+  macrotask channel, the fs doorbell, fork IPC, the Worker's own port — is built from
+  `NativeMessageChannel` or set up inside `internalPortSetup(…)`. A held runtime port
+  is how every worker spawn once hung: the parent waited on a child that its own
+  runtime port was keeping alive for ever. Headless this matters twice over: Node's own
+  listener bookkeeping calls `ref()` from inside `addEventListener`.
+- **A closed peer releases.** Node closes this end when the other closes; a browser
+  says nothing. `close()` on a guest port posts a close signal after everything it
+  sent, and the receiving end closes too — the signal never reaches a listener or a
+  `receiveMessageOnPort` inbox. Without it, a listening port is a hang the moment the
+  fix above makes it hold.
+- **A python process gets the platform's `MessageChannel`.** Pyodide boots on the
+  web-worker path and keeps one channel with a permanent `onmessage` as its scheduler;
+  as a guest channel it would hold every python process open for ever.
 - **`release()` must wake the loop, like `retain()` does.** A release can land inside
   a host callback with the loop parked in `waitForNext`; retaining without waking
   misses work, releasing without waking hangs a process that has just finished.
+- Headless cannot see any of the browser half: the platform port there is Node's,
+  which already does it right. `spike-port-browser.mjs` drives the shipped modules on a
+  port shaped like the HTML spec's; `spike-port-liveness.mjs` compares to real Node.
 
 ### An `fs` error is five facts, not one — label it in the binding
 The syscall bridge can only report a **code**: a Rust VFS failure crossing the
